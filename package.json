@@ -2,6 +2,7 @@
   "name": "betterdiscord-dccon",
   "private": true,
   "scripts": {
+    "build:packages": "node shelter/build.cjs",
     "test": "node --test tests/*.test.js"
   },
   "devDependencies": {

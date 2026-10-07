@@ -1,0 +1,3 @@
+[submodule "vendor/shelter"]
+	path = vendor/shelter
+	url = https://github.com/uwu/shelter-builds.git

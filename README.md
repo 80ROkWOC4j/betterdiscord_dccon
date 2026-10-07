@@ -1,6 +1,6 @@
-# DCCon for BetterDiscord
+# DCCon for Discord
 
-Discord 채팅 입력창에서 디시콘을 보내는 BetterDiscord 플러그인입니다.
+Discord 채팅 입력창에서 디시콘을 보내는 확장입니다. BetterDiscord 플러그인 또는 일반 Discord에 직접 설치해 사용합니다.
 
 
 <img src="images/picker.png" alt="디시콘 선택창" width="520">
@@ -16,17 +16,51 @@ Discord 채팅 입력창에서 디시콘을 보내는 BetterDiscord 플러그인
 
 ## 설치
 
-Discord에 [BetterDiscord](https://betterdiscord.app/) 설치가 필요합니다.
+| 방식 | 대상 |
+| --- | --- |
+| BetterDiscord | 이미 BetterDiscord를 사용하는 경우 DCCon 플러그인 |
+| 스탠드얼론 | 바닐라 디스코드의 경우. 내부적으로는 shelter 번들링으로 작동 |
 
-1. `DCCon.plugin.js` 파일을 다운
+### BetterDiscord용
+
+먼저 [BetterDiscord](https://betterdiscord.app/)가 설치되어 있어야 합니다. PowerShell에 다음 명령을 입력합니다.
+
+```powershell
+& ([scriptblock]::Create((irm https://github.com/80ROkWOC4j/betterdiscord_dccon/releases/latest/download/install.ps1))) -Mode BetterDiscord
+```
+
+설치 후 **Discord 설정 → BetterDiscord → 플러그인**에서 DCCon을 활성화합니다.
+
+혹은 수동으로,
+
+1. [Release](https://github.com/80ROkWOC4j/betterdiscord_dccon/releases)에서 `DCCon.plugin.js` 파일을 다운
 2. Discord의 **설정 → BetterDiscord → 플러그인 → 플러그인 폴더 열기**로 폴더를 열고
 3. 해당 폴더에 파일을 복사하고 DCCon을 활성화
-4. 변경 내용이 반영되지 않으면 Discord에서 `Ctrl+R`로 새로고침
 
 Windows의 일반적인 설치 경로:
 
 ```text
 %APPDATA%\BetterDiscord\plugins\DCCon.plugin.js
+```
+
+### 스탠드얼론
+
+shelter와 DCCon을 함께 설치하며 이미 shelter가 설치된 환경에 플러그인만 추가하는 방식은 현재 제공하지 않습니다.
+
+**Discord를 완전히 종료한 뒤** PowerShell에서 실행합니다.
+
+```powershell
+& ([scriptblock]::Create((irm https://github.com/80ROkWOC4j/betterdiscord_dccon/releases/latest/download/install.ps1))) -Mode Standalone
+```
+
+### 업데이트와 복구
+
+업데이트는 사용 중인 방식의 설치 명령을 다시 실행하면 됩니다.
+
+스탠드얼론 제거하고 원본 Discord로 복구하려면 Discord를 완전히 종료한 뒤 아래 명령어 실행합니다.
+
+```powershell
+& ([scriptblock]::Create((irm https://github.com/80ROkWOC4j/betterdiscord_dccon/releases/latest/download/install.ps1))) -Mode Standalone -Restore
 ```
 
 ## 사용법
@@ -78,14 +112,16 @@ Shift+클릭한 콘은 선택창 아래의 **모아둔 콘** 목록에 표시됩
 
 ### 이미지 캐시
 
-팩 추가 시 매번 이미지 다운로드를 막기 위해 아래 경로에 전체 콘들을 한번 다운받습니다.
+팩 추가 시 매번 이미지 다운로드를 막기 위해 아래 경로에 전체 콘들을 한번 다운받습니다. 설치 방식에 따라 경로가 다릅니다.
 
-```text
-%APPDATA%\BetterDiscord\plugins\DCCon-cache\
-```
+| 설치 방식 | 캐시 경로 |
+| --- | --- |
+| BetterDiscord | `%APPDATA%\BetterDiscord\plugins\DCCon-cache\` |
+| 스탠드얼론 | `%APPDATA%\DCCon-shelter\DCCon-cache\` |
+
+임베딩 모델과 벡터도 각 캐시 폴더의 `embedding-gemma2` 아래에 저장됩니다.
 
 캐시 용량 제한과 자동 정리는 없습니다.
-
 
 ## 의미 기반 검색
 
@@ -103,6 +139,9 @@ Shift+클릭한 콘은 선택창 아래의 **모아둔 콘** 목록에 표시됩
 
 ## 출처 및 라이선스
 
-- 원본 프로젝트: [DCCon2](https://github.com/minibox24/DCCon) — 현재 삭제
+- 원본 프로젝트: [DCCon2](https://github.com/minibox24/DCCon) 현재 삭제 상태
 - 참고 프로젝트: [Dastan21/BDAddons — FavoriteMedia](https://github.com/Dastan21/BDAddons/blob/main/plugins/FavoriteMedia/FavoriteMedia.plugin.js)
-- 라이선스: [GNU GPL v3](LICENSE) — 원본 라이선스
+- 스탠드얼론 기반: [shelter](https://github.com/uwu/shelter) — 공식 배포본을 [`vendor/shelter`](vendor/shelter) submodule의 커밋으로 고정
+- 라이선스: [GNU GPL v3](LICENSE)
+
+소스에서 빌드할 때는 먼저 `git submodule update --init --recursive`로 의존성을 준비합니다. 이후 `npm ci`, `npm run build:packages`를 실행합니다.
