@@ -20,7 +20,7 @@ async function scenario(file, initial, run) {
   const uploads = [];
   const nativeUploads = [];
   let requests = 0;
-  const context = {module: {exports: {}}, structuredClone, Blob, File, URL, BdApi: {
+  const context = {module: {exports: {}}, structuredClone, setTimeout, clearTimeout, Blob, File, URL, BdApi: {
     React,
     // Deliberately return the SAME object, as a cached BetterDiscord store can.
     Data: {load: (_, key) => data[key], save: (_, key, value) => { data[key] = value; }},

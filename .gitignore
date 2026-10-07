@@ -13,4 +13,4 @@ node_modules/
 upstream
 
 # Generated UI previews (documentation images live in images)
-/artifacts/ui-previews/
+artifacts

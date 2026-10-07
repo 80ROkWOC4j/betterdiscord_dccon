@@ -6,6 +6,7 @@ const vm = require('node:vm');
 
 function load(file, {components = false, missingSearchModule = true, environment = {}, api = {}} = {}) {
   const context = {
+    setTimeout, clearTimeout,
     structuredClone,
     module: {exports: {}},
     window: {addEventListener() {}, removeEventListener() {}},

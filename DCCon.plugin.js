@@ -763,18 +763,44 @@ class DCConPanel extends BdApi.React.Component {
   constructor(props) {
     super(props);
     this.state = { textFilter: "", selected: "all", dccons: loadPacks() };
-    this.clearSearch = () => this.setState({ textFilter: "" });
+    this.clearSearch = () => this.changeSearch("");
     this.refresh = () => this.setState({ revision: (this.state.revision ?? 0) + 1 });
+    this.embeddingRefresh = () => {
+      this.refresh();
+      const phase = Embedding.status.phase;
+      if (!Embedding.enabled() || (phase !== this.embeddingPhase && ["이미지 색인", "준비 완료", "완료 · 일부 실패"].includes(phase))) this.changeSearch(this.state.textFilter);
+      this.embeddingPhase = phase;
+    };
   }
 
   componentDidMount() {
     PluginEvents.subscribe("DCCON_FAVORITES_UPDATE", this.refresh);
     PluginEvents.subscribe("DCCON_RECENT_UPDATE", this.refresh);
+    this.mounted = true;
+    PluginEvents.subscribe("DCCON_EMBEDDING_UPDATE", this.embeddingRefresh);
   }
 
   componentWillUnmount() {
     PluginEvents.unsubscribe("DCCON_FAVORITES_UPDATE", this.refresh);
     PluginEvents.unsubscribe("DCCON_RECENT_UPDATE", this.refresh);
+    this.mounted = false; clearTimeout(this.searchTimer); this.searchGeneration = (this.searchGeneration || 0) + 1;
+    PluginEvents.unsubscribe("DCCON_EMBEDDING_UPDATE", this.embeddingRefresh);
+  }
+
+  changeSearch(text) {
+    clearTimeout(this.searchTimer);
+    const generation = this.searchGeneration = (this.searchGeneration || 0) + 1;
+    const semantic = Embedding.enabled() && text.trim();
+    this.setState({textFilter: text, semanticResults: [], searchError: "", searching: Boolean(semantic)});
+    if (!semantic) return;
+    this.searchTimer = setTimeout(async () => {
+      try {
+        const semanticResults = await Embedding.search(text.trim());
+        if (this.mounted && generation === this.searchGeneration) this.setState({semanticResults, searching: false});
+      } catch (error) {
+        if (this.mounted && generation === this.searchGeneration) this.setState({searchError: String(error.message), searching: false});
+      }
+    }, 350);
   }
 
   filterDccons() {
@@ -792,6 +818,12 @@ class DCConPanel extends BdApi.React.Component {
     const packs = this.filterDccons();
     const query = this.state.textFilter.trim().toLowerCase();
     const isFavorites = this.state.selected === "favorites";
+    const semantic = Embedding.enabled() && Boolean(query);
+    const semanticResults = (this.state.semanticResults || []).filter(({con}) => {
+      if (this.state.selected === "all") return true;
+      if (["favorites", "recent"].includes(this.state.selected)) return loadData(this.state.selected, []).some(item => item.path === con.path);
+      return String(con.packageIdx) === this.state.selected;
+    }).slice(0, 60);
     const recent = loadData(isFavorites ? "favorites" : "recent", []).filter(con => !query || con.title.toLowerCase().includes(query));
     const select = id => {
       this.setState({ selected: id });
@@ -807,9 +839,9 @@ class DCConPanel extends BdApi.React.Component {
         h("div", { className: "dccon-search-field" },
           h("svg", { "aria-hidden": true, width: 20, height: 20, viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: 2 },
             h("circle", { cx: 10, cy: 10, r: 6 }), h("path", { d: "m15 15 6 6" })),
-          h("input", { className: "dccon-search-input", "aria-label": "디시콘 검색", placeholder: "디시콘 이름이나 팩 검색하기",
+          h("input", { className: "dccon-search-input", "aria-label": "디시콘 검색", placeholder: Embedding.enabled() ? "표정이나 상황으로 검색하기" : "디시콘 이름이나 팩 검색하기",
             autoFocus: true, value: this.state.textFilter,
-            onChange: e => this.setState({ textFilter: e.target.value }),
+            onChange: e => this.changeSearch(e.target.value),
           }),
           this.state.textFilter && h("button", { type: "button", "aria-label": "검색 지우기", onClick: this.clearSearch }, "×")
         )
@@ -825,7 +857,11 @@ class DCConPanel extends BdApi.React.Component {
           h("button", { type: "button", className: "dccon-rail-button", "aria-label": "팩 추가 / 관리", title: "팩 추가 / 관리", onClick: this.props.onManage }, "+")
         ),
         h("div", { className: "dccon-browser-content", ref: element => { this.content = element; } },
-          (this.state.selected === "recent" || isFavorites)
+          semantic ? h("section", null,
+            h("h3", {className: "dccon-section-title"}, "의미 기반 검색"),
+            h("p", {role: "status"}, this.state.searching ? "검색 중…" : this.state.searchError || `완료된 색인에서 ${semanticResults.length}개 결과`),
+            h("div", {className: "dccon-items"}, semanticResults.map(({con}) => h(DCConItem, {key: Embedding.key(con), con, packageIdx: con.packageIdx}))))
+          : (this.state.selected === "recent" || isFavorites)
             ? h("section", null, h("h3", { className: "dccon-section-title" }, isFavorites ? "즐겨찾기" : "최근 사용"),
                 recent.length ? h("div", { className: "dccon-items" }, recent.map(con => h(DCConItem, { key: con.idx, con, packageIdx: con.packageIdx })))
                   : h("div", { className: "dccon-empty-state", role: "status" }, query ? "검색 결과가 없습니다." : isFavorites ? "콘의 ☆ 버튼으로 즐겨찾기를 추가하세요." : "사용한 디시콘이 여기에 표시됩니다."))
@@ -865,6 +901,7 @@ function loadData(key, defaultData) {
 
 function saveData(key, data) {
   BdApi.Data.save("DCCon", key, data);
+  if (key === "dccons" && Embedding.enabled()) void Embedding.index();
 }
 
 function uniquePacks(packs) {
@@ -1079,6 +1116,305 @@ function inspectInstantSend() {
   return report;
 }
 
+// Runs in a browser Worker: no Node, native addons, or local PoC server required.
+async function embeddingWorker() {
+  let model, processor, RawImage, RawVideo, RawVideoFrame, requestId = 0, work = Promise.resolve();
+  const downloads = new Map();
+  const nativeFetch = self.fetch.bind(self);
+  self.fetch = (url, options) => String(url).startsWith("blob:") ? nativeFetch(url, options) : new Promise((resolve, reject) => {
+    const id = ++requestId;
+    downloads.set(id, {resolve, reject});
+    self.postMessage({download: id, url: String(url).replace("/resolve/main/", "/resolve/daa72c51243991dfcaf9f9137d2c573d8f7790c0/")});
+  });
+  const normalize = vector => {
+    const norm = Math.hypot(...vector);
+    if (vector.length !== 768 || !Number.isFinite(norm) || !norm) throw Error("유효하지 않은 임베딩 결과");
+    return Array.from(vector, value => value / norm);
+  };
+  const embed = async (text, images, video = null) => {
+    const inputs = await processor(text, images, null, video);
+    let output;
+    try { output = await model(inputs); return normalize(output.sentence_embedding.data); }
+    finally {
+      for (const tensor of Object.values(inputs)) tensor?.dispose?.();
+      for (const tensor of Object.values(output || {})) tensor?.dispose?.();
+    }
+  };
+  const decode = async (bytes, type) => {
+    const images = [], frames = [];
+    let video = null;
+    const add = async source => {
+      const canvas = new OffscreenCanvas(source.displayWidth || source.width, source.displayHeight || source.height);
+      const ctx = canvas.getContext("2d", {willReadFrequently: true});
+      ctx.fillStyle = "white"; ctx.fillRect(0, 0, canvas.width, canvas.height); ctx.drawImage(source, 0, 0);
+      const rgba = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+      const rgb = new Uint8ClampedArray(canvas.width * canvas.height * 3);
+      for (let i = 0, j = 0; i < rgba.length; i += 4) {rgb[j++] = rgba[i]; rgb[j++] = rgba[i + 1]; rgb[j++] = rgba[i + 2];}
+      images.push(new RawImage(rgb, canvas.width, canvas.height, 3));
+    };
+    if (type === "image/gif") {
+      if (typeof ImageDecoder === "undefined") throw Error("이 환경은 GIF 프레임 디코딩을 지원하지 않습니다.");
+      const decoder = new ImageDecoder({data: bytes, type});
+      try {
+        await decoder.tracks.ready;
+        const count = decoder.tracks.selectedTrack.frameCount, durations = [];
+        for (let i = 0; i < count; i++) {
+          const {image} = await decoder.decode({frameIndex: i});
+          durations.push(Math.max(1, image.duration || 100000)); image.close();
+        }
+        const total = durations.reduce((a, b) => a + b, 0), selected = new Set();
+        for (let i = 0; i < Math.min(6, count); i++) {
+          if (count <= 6) {selected.add(i); continue;}
+          const target = total * (i + 0.5) / 6;
+          let elapsed = 0;
+          selected.add(durations.findIndex(duration => (elapsed += duration) > target));
+        }
+        for (const frameIndex of selected) {
+          const {image} = await decoder.decode({frameIndex});
+          try {
+            await add(image);
+            frames.push(new RawVideoFrame(images.at(-1), durations.slice(0, frameIndex).reduce((a, b) => a + b, 0) / 1000000));
+          } finally {image.close();}
+        }
+        video = new RawVideo(frames, total / 1000000);
+      } finally {decoder.close();}
+    } else {
+      const bitmap = await createImageBitmap(new Blob([bytes], {type}));
+      try {await add(bitmap);} finally {bitmap.close();}
+    }
+    return {images: video ? null : images, video};
+  };
+  self.onmessage = ({data}) => {
+    if (data.download) {
+      const task = downloads.get(data.download); downloads.delete(data.download);
+      if (data.error) task.reject(Error(data.error));
+      else task.resolve(new Response(data.bytes, {status: 200, headers: {"Content-Length": String(data.bytes.byteLength)}}));
+      return;
+    }
+    work = work.then(async () => {
+      try {
+        let result;
+        if (data.action === "init") {
+          const lib = await import(data.library);
+          RawImage = lib.RawImage; RawVideo = lib.RawVideo; RawVideoFrame = lib.RawVideoFrame;
+          lib.env.allowLocalModels = false; lib.env.useBrowserCache = false; lib.env.useWasmCache = false;
+          lib.env.backends.onnx.wasm.numThreads = 1;
+          lib.env.backends.onnx.wasm.wasmBinary = data.wasm;
+          lib.env.backends.onnx.wasm.wasmPaths = {mjs: data.factory};
+          const options = {revision: "daa72c51243991dfcaf9f9137d2c573d8f7790c0"};
+          const name = "onnx-community/embeddinggemma-2-ONNX";
+          processor = await lib.AutoProcessor.from_pretrained(name, options);
+          processor.image_processor.max_soft_tokens = 560;
+          processor.video_processor.frame_processor.max_soft_tokens = 280;
+          processor.video_processor.max_frames = 6;
+          const config = await lib.AutoConfig.from_pretrained(name, options); config.audio_config = null;
+          model = await lib.AutoModel.from_pretrained(name, {...options, config, device: "webgpu", dtype: "q8"});
+          result = {device: "webgpu"};
+        } else if (data.action === "image") {
+          const decoded = await decode(data.bytes, data.type);
+          result = await embed(null, decoded.images, decoded.video);
+        }
+        else if (data.action === "query") result = await embed("task: search result | query: " + data.text);
+        self.postMessage({id: data.id, result});
+      } catch (error) {self.postMessage({id: data.id, error: String(error.message || error)});}
+    });
+  };
+}
+
+const Embedding = {
+  worker: null, generation: 0, sequence: 0, pending: new Map(), vectors: {}, urls: [],
+  status: {phase: "꺼짐", completed: 0, total: 0, errors: 0},
+  enabled() {return loadData("embeddingEnabled", false) === true;},
+  key(con) {return con.path + ":" + con.ext;},
+  update(changes) {
+    Object.assign(this.status, changes);
+    PluginEvents.dispatch({type: "DCCON_EMBEDDING_UPDATE"});
+  },
+  files() {
+    const fs = require("fs");
+    return Object.fromEntries(["readFile", "writeFile", "mkdir", "rename"].map(method => [method,
+      (...args) => new Promise((resolve, reject) => fs[method](...args, (error, value) => error ? reject(error) : resolve(value))),
+    ]));
+  },
+  directory() {return require("path").join(BdApi.Plugins.folder, "DCCon-cache", "embedding-gemma2");},
+  async download(url, generation) {
+    // BetterDiscord's automatic redirect handler cannot resolve relative Location headers.
+    for (let redirects = 0; redirects <= 8; redirects++) {
+      if (generation !== this.generation) throw Error("임베딩 중단됨");
+      const response = await BdApi.Net.fetch(url, {responseType: "arraybuffer", redirect: "manual"});
+      if (![301, 302, 303, 307, 308].includes(response.status)) return response;
+      const location = response.headers?.get?.("location");
+      if (!location) throw Error("모델 다운로드 리다이렉트 주소가 없습니다.");
+      const next = new URL(location, url);
+      if (next.protocol !== "https:") throw Error("모델 다운로드는 HTTPS만 지원합니다.");
+      url = next.href;
+    }
+    throw Error("모델 다운로드 리다이렉트 횟수를 초과했습니다.");
+  },
+  async asset(url, generation, expectedHash) {
+    const fs = this.files(), hash = bytes => require("crypto").createHash("sha256").update(bytes).digest("hex");
+    const file = require("path").join(this.directory(), hash(url));
+    let bytes;
+    try {bytes = await fs.readFile(file, null);} catch { /* Download on cache miss. */ }
+    if (!bytes || typeof bytes === "string" || (expectedHash && hash(bytes) !== expectedHash)) {
+      if (generation !== this.generation) throw Error("임베딩 중단됨");
+      this.update({phase: "모델 다운로드", file: url.split("/").pop()});
+      const response = await this.download(url, generation);
+      if (response.status >= 400 || response.ok === false) throw Error(`모델 다운로드 실패 (${response.status}): ${url.split("/").pop()}`);
+      bytes = new Uint8Array(await response.arrayBuffer());
+      if (expectedHash && hash(bytes) !== expectedHash) throw Error("임베딩 런타임 무결성 확인 실패");
+      if (generation !== this.generation) throw Error("임베딩 중단됨");
+      await fs.writeFile(file + ".tmp-" + generation, bytes);
+      await fs.rename(file + ".tmp-" + generation, file);
+    }
+    return new Uint8Array(bytes).buffer;
+  },
+  call(action, args = {}) {
+    const worker = this.worker;
+    if (!worker) return Promise.reject(Error("임베딩 모델이 준비되지 않았습니다."));
+    return new Promise((resolve, reject) => {
+      const id = ++this.sequence; this.pending.set(id, {resolve, reject});
+      worker.postMessage({id, action, ...args});
+    });
+  },
+  stop() {
+    this.generation++;
+    this.worker?.terminate(); this.worker = null;
+    for (const task of this.pending.values()) task.reject(Error("임베딩 중단됨"));
+    this.pending.clear(); this.urls.forEach(url => URL.revokeObjectURL(url)); this.urls = [];
+    this.ready = false; this.indexing = false; this.reindex = false;
+    this.update({phase: "꺼짐", file: ""});
+  },
+  toggle(enabled) {
+    saveData("embeddingEnabled", enabled);
+    if (enabled) this.start(); else this.stop();
+  },
+  async start() {
+    this.stop();
+    const generation = this.generation;
+    this.update({phase: "준비 중", completed: 0, total: 0, errors: 0, error: ""});
+    try {
+      if (!globalThis.navigator?.gpu) throw Error("현재 Discord에서 WebGPU를 사용할 수 없습니다.");
+      await this.files().mkdir(this.directory(), {recursive: true});
+      this.vectors = {};
+      try {
+        const saved = JSON.parse(await this.files().readFile(require("path").join(this.directory(), "vectors-v1.json"), "utf8"));
+        if (generation !== this.generation) return;
+        if (["q8-560-gif3-browser-v1", "q8-image560-video6x280-v2"].includes(saved.spec) && saved.vectors) this.vectors = Object.fromEntries(
+          Object.entries(saved.vectors).filter(([key, vector]) => (saved.spec === "q8-image560-video6x280-v2" || !key.endsWith(":gif")) && Array.isArray(vector) && vector.length === 768 && vector.every(Number.isFinite)));
+      } catch { /* First index or interrupted write: rebuild missing entries. */ }
+      const runtime = "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.31.0-dev.20260914-8d85527a0/dist/";
+      const library = await this.asset("https://cdn.jsdelivr.net/npm/@huggingface/transformers@4.3.1/dist/transformers.min.js", generation,
+        "8d6716d9086f57c30a4bf367dba61b887593573c770c454465e8019b2703e743");
+      const factory = await this.asset(runtime + "ort-wasm-simd-threaded.asyncify.mjs", generation,
+        "0966b6105cd936744498aa60df7a22cbd47af3374dbc64a9ab561c08a71e3611");
+      const wasm = await this.asset(runtime + "ort-wasm-simd-threaded.asyncify.wasm", generation,
+        "49871f5a4409519797e127440868a6d1923339d9185907f301a5b2a1d90af082");
+      if (generation !== this.generation) return;
+      const blob = code => {const url = URL.createObjectURL(new Blob([code], {type: "text/javascript"})); this.urls.push(url); return url;};
+      const worker = this.worker = new Worker(blob(`(${embeddingWorker.toString()})();`), {type: "module"});
+      worker.onmessage = async ({data}) => {
+        if (generation !== this.generation) return;
+        if (data.download) {
+          try {
+            if (!data.url.startsWith("https://huggingface.co/onnx-community/embeddinggemma-2-ONNX/resolve/daa72c51243991dfcaf9f9137d2c573d8f7790c0/")) throw Error("예상하지 못한 모델 URL");
+            const bytes = await this.asset(data.url, generation);
+            if (generation === this.generation) worker.postMessage({download: data.download, bytes}, [bytes]);
+          } catch (error) {if (generation === this.generation) worker.postMessage({download: data.download, error: String(error.message)});}
+        } else {
+          const task = this.pending.get(data.id); this.pending.delete(data.id);
+          if (data.error) task?.reject(Error(data.error)); else task?.resolve(data.result);
+        }
+      };
+      worker.onerror = event => {
+        if (generation !== this.generation) return;
+        const error = event.message || "임베딩 Worker 실행 실패";
+        this.stop(); this.update({phase: "오류", error});
+      };
+      this.update({phase: "모델 불러오는 중", file: ""});
+      await this.call("init", {library: blob(library), factory: blob(factory), wasm});
+      if (generation !== this.generation) return;
+      this.ready = true;
+      await this.index();
+    } catch (error) {
+      if (generation !== this.generation) return;
+      this.stop(); this.update({phase: "오류", error: String(error.message)});
+    }
+  },
+  async index() {
+    if (!this.ready) return;
+    if (this.indexing) {this.reindex = true; return;}
+    this.indexing = true;
+    const generation = this.generation;
+    const items = [...new Map(loadPacks().flatMap(pack => pack.detail).map(con => [this.key(con), con])).values()];
+    this.update({phase: "이미지 색인", total: items.length, completed: 0, errors: 0, file: ""});
+    const checkpoint = async () => {
+      const file = require("path").join(this.directory(), "vectors-v1.json"), fs = this.files();
+      await fs.writeFile(file + ".tmp-" + generation, JSON.stringify({spec: "q8-image560-video6x280-v2", vectors: this.vectors}));
+      if (generation === this.generation) await fs.rename(file + ".tmp-" + generation, file);
+    };
+    try {
+      for (const [i, con] of items.entries()) {
+        if (generation !== this.generation) return;
+        try {
+          const key = this.key(con);
+          if (!this.vectors[key]) {
+            const file = await getDCConImage(con);
+            if (generation !== this.generation) return;
+            const vector = await this.call("image", {bytes: await file.arrayBuffer(), type: con.ext === "gif" ? "image/gif" : "image/png"});
+            if (generation !== this.generation) return;
+            this.vectors[key] = vector;
+          }
+        } catch (error) {
+          if (generation !== this.generation) return;
+          this.update({errors: this.status.errors + 1, error: String(error.message)});
+          // A failed model/device should not trigger hundreds of repeated inference attempts.
+          if (this.status.errors >= 3) throw error;
+        }
+        this.update({completed: i + 1});
+        if ((i + 1) % 10 === 0) await checkpoint();
+      }
+      await checkpoint();
+      if (generation === this.generation) this.update({phase: this.status.errors ? "완료 · 일부 실패" : "준비 완료"});
+    } catch (error) {if (generation === this.generation) this.update({phase: "오류", error: String(error.message)});}
+    finally {
+      if (generation === this.generation) {
+        this.indexing = false;
+        if (this.reindex) {this.reindex = false; void this.index();}
+      }
+    }
+  },
+  async search(text) {
+    if (!this.ready) throw Error(this.status.error || "모델 준비 중입니다. 설정에서 진행 상태를 확인하세요.");
+    const vector = await this.call("query", {text});
+    const results = loadPacks().flatMap(pack => pack.detail.map(con => ({...con, packageIdx: pack.info.package_idx})))
+      .filter(con => this.vectors[this.key(con)])
+      .map(con => ({con, score: this.vectors[this.key(con)].reduce((sum, value, i) => sum + value * vector[i], 0)}));
+    const unique = new Map();
+    for (const item of results.sort((a, b) => b.score - a.score)) if (!unique.has(this.key(item.con))) unique.set(this.key(item.con), item);
+    return [...unique.values()];
+  },
+};
+
+class EmbeddingEnvironmentPanel extends BdApi.React.Component {
+  constructor(props) { super(props); this.state = {}; this.refresh = () => this.setState({revision: (this.state.revision || 0) + 1}); }
+  componentDidMount() { PluginEvents.subscribe("DCCON_EMBEDDING_UPDATE", this.refresh); }
+  componentWillUnmount() { PluginEvents.unsubscribe("DCCON_EMBEDDING_UPDATE", this.refresh); }
+  render() {
+    const h = BdApi.React.createElement;
+    return h("section", {className: "dccon-embedding-environment"},
+      h("h3", null, "디시콘 임베딩"),
+      h("label", null, h("input", {type: "checkbox", checked: Embedding.enabled(), onChange: e => Embedding.toggle(e.target.checked)}), " 의미 기반 검색 활성화"),
+      h("p", null, "활성화하면 EmbeddingGemma 2 모델(약 550 MB)을 다운로드하고 WebGPU로 이미지를 임베딩 합니다."),
+      Embedding.enabled() && h("div", {className: "dccon-embedding-progress"},
+        h("p", {role: "status"}, `${Embedding.status.phase} ${Embedding.status.file || ""} · ${Embedding.status.completed}/${Embedding.status.total} · 실패 ${Embedding.status.errors}`),
+        h("progress", {"aria-label": "디시콘 색인 진행률", max: Math.max(1, Embedding.status.total), value: ["이미지 색인", "준비 완료", "완료 · 일부 실패", "오류", "꺼짐"].includes(Embedding.status.phase) ? Embedding.status.completed : undefined}),
+        Embedding.status.error && h("p", {role: "alert"}, Embedding.status.error),
+        ["오류", "꺼짐", "완료 · 일부 실패"].includes(Embedding.status.phase) && h(Button, {text: "다시 시도", onClick: () => Embedding.start()})),
+      h("p", null, "모델과 벡터는 DCCon-cache/embedding-gemma2에 보관됩니다. 비활성화 하면 작업 중단합니다."));
+  }
+}
+
 // 설정 패널 컴포넌트
 class DCConSettingsPanel extends BdApi.React.Component {
   constructor(props) {
@@ -1258,7 +1594,7 @@ class DCConSettingsPanel extends BdApi.React.Component {
     const h = BdApi.React.createElement;
     if (this.props.section === "settings") {
       return h("div", {className: "dccon-settings-panel dccon-user-settings"},
-        this.renderOptions(), this.renderDiagnostics());
+        this.renderOptions(), h(EmbeddingEnvironmentPanel), this.renderDiagnostics());
     }
     return h("div", {className: "dccon-settings-panel"},
       h("div", {className: "dccon-tab-menu"},
@@ -1305,6 +1641,7 @@ module.exports = class DCCon {
 
 
     warmCache(repairedPacks.flatMap(pack => pack.detail));
+    if (Embedding.enabled()) void Embedding.start();
     this.patchChannelTextArea();
 
 
@@ -1318,6 +1655,7 @@ module.exports = class DCCon {
 
   stop() {
     cacheGeneration++;
+    Embedding.stop();
     BdApi.Patcher.unpatchAll(this.meta.name);
     PluginEvents.dispatch({ type: "DCCON_UNPATCH_ALL" });
     BdApi.DOM.removeStyle(this.meta.name);
@@ -1405,7 +1743,7 @@ module.exports = class DCCon {
 .dccon-search-input::placeholder, .dccon-search-bar input::placeholder { color: var(--dc-muted); opacity: 1; }
 .dccon-search-field button { background: transparent; font-size: 20px; }
 .dccon-browser { flex: 1; min-height: 0; display: flex; border-top: 1px solid var(--border-subtle, #80808033); }
-.dccon-rail { flex: 0 0 60px; display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 8px 6px; overflow-y: auto; background: var(--dc-inset); }
+.dccon-rail { flex: 0 0 auto; width: max-content; min-width: 60px; display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 8px 6px; overflow-y: auto; overflow-x: hidden; scrollbar-gutter: stable; background: var(--dc-inset); }
 .dccon-rail-button { position: relative; width: 44px; height: 44px; flex-shrink: 0; display: flex; align-items: center; justify-content: center; border-radius: 10px; background: transparent; font-size: 26px !important; }
 .dccon-rail-button img { width: 32px; height: 32px; border-radius: 6px; object-fit: contain; }
 .dccon-rail-button:hover { background: var(--dc-hover); }
@@ -1444,6 +1782,11 @@ module.exports = class DCCon {
 .dccon-user-settings { overflow-y: auto; }
 .dccon-user-settings h3 { margin: 0 0 12px; font-size: 16px; color: var(--dc-text); }
 .dccon-user-settings .dccon-diagnostics { border-top: 1px solid #80808033; margin-top: 20px; padding-top: 20px; }
+.dccon-embedding-environment { border-top: 1px solid #80808033; margin-top: 20px; padding-top: 20px; }
+.dccon-embedding-environment p { color: var(--dc-muted); font-size: 13px; line-height: 1.5; }
+.dccon-embedding-environment label { display: flex; align-items: center; gap: 8px; cursor: pointer; }
+.dccon-embedding-environment input { width: 18px; height: 18px; accent-color: var(--dc-accent); }
+.dccon-embedding-progress progress { width: 100%; height: 10px; accent-color: var(--dc-accent); }
 .dccon-report-steps { padding-left: 20px; color: var(--dc-muted); line-height: 1.7; margin: 0 0 12px; }
 .dccon-options { border: 0; margin: 0; padding: 0; min-width: 0; }
 .dccon-options legend { font-size: 16px; font-weight: 600; padding: 0 0 12px; }
