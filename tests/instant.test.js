@@ -316,10 +316,10 @@ test('BetterDiscord UTF-8 default cannot corrupt binary image bytes after cache 
   assert.equal(second.calls.fetches, 0);
 });
 
-test('link clicks including Shift send only one URL without staging or buffering', async () => {
+test('quick mode ordinary clicks send one URL without fetching images', async () => {
   const {api, calls, data} = harness({fetchFails: true});
   api.changeSendMode('link');
-  assert.equal(await api.sendDCConMessage(con, {keepOpen: true}), true);
+  assert.equal(await api.sendDCConMessage(con), true);
   assert.equal(calls.posts.length, 1);
   assert.equal(await api.sendDCConMessage({...con, path: 'second&x=1'}), true);
   assert.equal(calls.fetches, 0);
@@ -336,10 +336,56 @@ test('link clicks including Shift send only one URL without staging or buffering
 test('link failure never buffers, retries or falls back to upload', async () => {
   const {api, calls} = harness({postFails: true});
   api.changeSendMode('link');
-  assert.equal(await api.sendDCConMessage(con, {keepOpen: true}), false);
+  assert.equal(await api.sendDCConMessage(con), false);
   assert.equal(api.activeQueue('test-channel').length, 0);
   assert.equal(calls.posts.length, 1);
   assert.equal(calls.uploads.length, 0);
+});
+
+test('quick mode rapid Shift clicks then ordinary click send images together and return to links', async () => {
+  const {api, calls, data} = harness();
+  api.changeSendMode('link');
+  const first = api.sendDCConMessage(con, {keepOpen: true});
+  const second = api.sendDCConMessage({...con, path: 'second'}, {keepOpen: true});
+  const send = api.sendDCConMessage({...con, path: 'third'});
+  assert.deepEqual(await Promise.all([first, second, send]), [true, true, true]);
+  assert.equal(calls.posts.length, 1);
+  assert.equal(calls.posts[0].body.content, '');
+  assert.equal(calls.posts[0].body.attachments.length, 3);
+  assert.equal(calls.staged, 0);
+  assert.equal(calls.closes, 1);
+  assert.equal(data.sendMode, 'link');
+  assert.equal(api.activeQueue('test-channel').length, 0);
+  await api.sendDCConMessage(con);
+  assert.equal(calls.posts[1].body.attachments.length, 0);
+  assert.equal(calls.uploads.length, 3);
+});
+
+test('quick mode buffer is channel-local and clearing it restores link sending', async () => {
+  const {api, calls} = harness();
+  api.changeSendMode('link');
+  await api.sendDCConMessage(con, {keepOpen: true});
+  assert.equal(calls.posts.length, 0);
+  assert.equal(calls.closes, 0);
+  api.setChannel('other');
+  await api.sendDCConMessage(con);
+  assert.equal(calls.posts[0].body.attachments.length, 0);
+  assert.equal(api.activeQueue('test-channel').length, 1);
+  api.setChannel('test-channel');
+  api.removeBuffered('test-channel');
+  await api.sendDCConMessage(con);
+  assert.equal(calls.posts[1].body.attachments.length, 0);
+  assert.equal(calls.uploads.length, 0);
+});
+
+test('quick mode upload failure retains buffered images without falling back to links', async () => {
+  const {api, calls} = harness({uploadFails: true});
+  api.changeSendMode('link');
+  await api.sendDCConMessage(con, {keepOpen: true});
+  assert.equal(await api.sendDCConMessage({...con, path: 'last'}), false);
+  assert.equal(api.activeQueue('test-channel').length, 1);
+  assert.equal(calls.posts.length, 0);
+  assert.equal(calls.closes, 0);
 });
 
 test('mode change clears all channel buffers; reselecting current mode preserves them', async () => {

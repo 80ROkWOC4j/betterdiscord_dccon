@@ -513,19 +513,20 @@ const sendDCConMessage = (con, { keepOpen = false } = {}) => {
   const channelId = currentChannelId;
   const mode = sendMode();
   const attachOnly = mode === "attach";
-  const linkMode = mode === "link";
-  if (linkMode) keepOpen = false;
   const generation = bufferGeneration;
   if (sendingChannels.has(channelId)) return Promise.resolve(false);
   const sending = !attachOnly && !keepOpen;
   if (sending) sendingChannels.add(channelId);
   PluginEvents.dispatch({ type: "DCCON_BUFFER_UPDATE", channelId });
   const attempt = { startedAt, outcome: "진행 중", keepOpen, phase: "작업 대기",
-    mode: attachOnly ? "첨부 누적" : keepOpen ? "버퍼 누적" : linkMode ? "링크 즉시 전송" : "누적 즉시 전송" };
+    mode: attachOnly ? "첨부 누적" : keepOpen ? "버퍼 누적" : "즉시 전송" };
   const task = (channelTasks.get(channelId) ?? Promise.resolve()).then(async () => {
     lastSendAttempt = attempt;
     try {
       if (generation !== bufferGeneration) { attempt.outcome = "모드 변경으로 취소"; return false; }
+      // Resolve after earlier Shift-click tasks have populated the channel buffer.
+      const linkMode = mode === "link" && !keepOpen && activeQueue(channelId).length === 0;
+      if (sending) attempt.mode = linkMode ? "링크 즉시 전송" : "누적 즉시 전송";
       markSend(attempt, "채널 확인", { hasChannel: Boolean(channelId) });
       if (!channelId) throw new Error("현재 채널을 찾을 수 없습니다.");
       if (!attachOnly && keepOpen && activeQueue(channelId).length >= 9)
@@ -594,7 +595,7 @@ class BufferTray extends BdApi.React.Component {
     if (!entries.length && !busy) return null;
     return h("section", { className: "dccon-buffer", "aria-label": "전송 대기 디시콘" },
       h("div", { className: "dccon-buffer-heading" },
-        h("span", {role: "status"}, busy ? "전송 중…" : "모아둔 콘 " + entries.length + "/9"),
+        h("span", {role: "status"}, busy ? "전송 중…" : "이미지 " + entries.length + "/9 · 다음 클릭으로 함께 전송"),
         h("button", {type: "button", disabled: busy, onClick: () => removeBuffered(channelId)}, "전체 비우기")),
       h("div", {className: "dccon-buffer-items"}, entries.map((entry, index) => h("button", {
         key: index, type: "button", disabled: busy, title: entry.con.title + " 제거",
@@ -743,7 +744,7 @@ class DCConItem extends BdApi.React.Component {
     const h = BdApi.React.createElement;
     const { con } = this.props;
     return h("div", { className: "dccon-tile" },
-      h("button", { type: "button", title: con.title + (sendMode() === "link" ? " · 클릭: 링크 하나 전송" : sendMode() === "attach" ? " · 클릭: 첨부파일 추가" : " · Shift+클릭: 모아두기"),
+      h("button", { type: "button", title: con.title + (sendMode() === "attach" ? " · 클릭: 첨부파일 추가" : " · Shift+클릭: 이미지 모아두기"),
         "aria-label": con.title, className: "dccon-item", disabled: this.state.busy || this.state.error,
         onClick: event => this.attach(event),
       }, this.state.error ? h("span", { className: "dccon-item-error" }, "이미지 로드 실패")
@@ -837,7 +838,7 @@ class DCConPanel extends BdApi.React.Component {
       h(BufferTray, {channelId: currentChannelId}),
       h("div", { className: "dccon-footer" }, sendMode() === "attach"
         ? "첨부 전용 · 클릭 / Shift+클릭: 첨부 누적 · 창 유지"
-        : sendMode() === "link" ? "링크 전송 · 클릭 / Shift+클릭: 한 개씩 즉시 전송"
+        : sendMode() === "link" ? "클릭: 링크 전송 · Shift+클릭: 이미지 모아두기 · 모은 이미지는 다음 클릭으로 함께 전송"
         : "클릭: 누적 콘과 함께 전송 · Shift+클릭: 모아두기 (최대 9개)")
     );
   }
@@ -1026,6 +1027,11 @@ class SavedDCConCard extends BdApi.React.Component {
           {},
           `${dccon.detail.length}개의 디시콘`
         ),
+        BdApi.React.createElement("div", {className: "dccon-pack-actions"},
+        BdApi.React.createElement("div", {className: "dccon-pack-order", role: "group", "aria-label": dccon.info.title + " 순서 조절"},
+          ...[[-1, "위로", this.props.isFirst], [1, "아래로", this.props.isLast]].map(([direction, label, disabled]) =>
+            BdApi.React.createElement("button", {key: direction, type: "button", disabled,
+              "aria-label": dccon.info.title + " " + label, onClick: () => this.props.onMove(direction)}, label))),
         BdApi.React.createElement(Button, {
           text: strings.settings.remove,
           color: "dccon-item-error",
@@ -1039,10 +1045,9 @@ class SavedDCConCard extends BdApi.React.Component {
             BdApi.UI.showToast("디시콘이 제거되었습니다.", { type: "success" });
           },
           style: {
-            marginTop: "auto",
             marginLeft: "auto",
           },
-        })
+        }))
       )
     );
   }
@@ -1168,8 +1173,8 @@ class DCConSettingsPanel extends BdApi.React.Component {
     return h("fieldset", { className: "dccon-options" },
       h("legend", null, "디시콘 클릭 동작"),
       ...[
-        ["link", "클릭 시 링크 전송(빠름)", "링크 바로 보냅니다. 디스코드 이미지 임베딩에 의존합니다."],
-        ["image", "클릭 시 이미지 전송", "이미지를 바로 보냅니다. Shift+클릭으로 모은 콘은 다음 일반 클릭 때 함께 전송합니다. 공앱 같은 작동."],
+        ["link", "빠른 전송", "클릭하면 링크를 보냅니다. Shift+클릭으로 이미지를 모으면 다음 일반 클릭 때 함께 이미지로 전송합니다."],
+        ["image", "항상 이미지 전송", "그냥 클릭도 항상 이미지 보냅니다."],
         ["attach", "클릭 시 첨부파일 추가", "입력창에 파일을 추가합니다. Shift+클릭도 동일합니다."],
       ].map(([mode, title, description]) => h("label", {key: mode, className: "dccon-mode-choice"},
         h("input", {type: "radio", name: "dccon-send-mode", value: mode, checked: this.state.sendMode === mode,
@@ -1221,10 +1226,21 @@ class DCConSettingsPanel extends BdApi.React.Component {
       "div",
       { className: "dccon-saved-container" },
       this.state.savedDccons.length > 0
-        ? this.state.savedDccons.map((dccon) =>
+        ? this.state.savedDccons.map((dccon, index) =>
             BdApi.React.createElement(SavedDCConCard, {
               key: dccon.info.package_idx,
               dccon: dccon,
+              isFirst: index === 0,
+              isLast: index === this.state.savedDccons.length - 1,
+              onMove: direction => {
+                const packs = loadPacks();
+                const from = packs.findIndex(pack => String(pack.info.package_idx) === String(dccon.info.package_idx));
+                const to = from + direction;
+                if (from < 0 || to < 0 || to >= packs.length) return;
+                [packs[from], packs[to]] = [packs[to], packs[from]];
+                saveData("dccons", packs);
+                this.setState({savedDccons: packs});
+              },
               onRemove: () => {
                 this.setState({ savedDccons: loadPacks() });
               },
@@ -1453,6 +1469,11 @@ module.exports = class DCCon {
 .dccon-card-content { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
 .dccon-card-content h3 { color: var(--dc-text); font-size: 14px; font-weight: 600; margin: 0; overflow-wrap: anywhere; }
 .dccon-card-content span { color: var(--dc-muted); font-size: 12px; }
+.dccon-pack-actions { display: flex; align-items: center; gap: 8px; margin-top: auto; padding-top: 4px; }
+.dccon-pack-order { display: flex; gap: 6px; }
+.dccon-pack-order button { font: inherit; color: var(--dc-text); background: var(--dc-hover); border: 0; border-radius: 4px; padding: 5px 10px; cursor: pointer; }
+.dccon-pack-order button:hover:not(:disabled) { background: var(--dc-selected); }
+.dccon-pack-order button:disabled { opacity: .35; cursor: default; }
 `;
   }
 };

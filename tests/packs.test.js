@@ -73,7 +73,7 @@ test('one add and a rapid repeated remove keep storage and UI synchronized witho
     assert.equal(document.querySelector('.dccon-card button').disabled, true);
     await click(document.querySelector('.dccon-tab-item'));
     assert.equal(document.querySelectorAll('.dccon-card').length, 1);
-    const remove = document.querySelector('.dccon-card button');
+    const remove = document.querySelector('.dccon-card .dccon-item-error');
     await React.act(async () => {
       remove.dispatchEvent(new window.MouseEvent('click', {bubbles: true}));
       remove.dispatchEvent(new window.MouseEvent('click', {bubbles: true}));
@@ -92,11 +92,32 @@ test('one add and a rapid repeated remove keep storage and UI synchronized witho
 test('existing numeric/string duplicate IDs render once and removal preserves other packs', async () => {
   await scenario('DCCon.plugin.js', [pack(42), pack('42'), pack(99, '다른 팩')], async ({data, click, errors}) => {
     assert.equal(document.querySelectorAll('.dccon-card').length, 2);
-    await click(document.querySelector('.dccon-card button'));
+    await click(document.querySelector('.dccon-card .dccon-item-error'));
     assert.equal(data.dccons.length, 1);
     assert.equal(String(data.dccons[0].info.package_idx), '99');
     assert.equal(document.querySelectorAll('.dccon-card').length, 1);
     assert.equal(document.querySelector('.dccon-card h3').textContent, '다른 팩');
+    assert.deepEqual(errors, []);
+  });
+});
+
+test('pack order controls persist order across remount and picker navigation', async () => {
+  const initial = [pack(1, '첫째'), pack(2, '둘째'), pack(3, '셋째')];
+  for (const item of initial) item.detail = [{idx: String(item.info.package_idx), title: '콘', path: 'image', ext: 'png'}];
+  await scenario('DCCon.plugin.js', initial, async ({data, root, DCConSettingsPanel, DCConPanel, click, errors}) => {
+    const titles = () => [...document.querySelectorAll('.dccon-card h3')].map(node => node.textContent);
+    assert.equal(document.querySelector('[aria-label="첫째 위로"]').disabled, true);
+    assert.equal(document.querySelector('[aria-label="셋째 아래로"]').disabled, true);
+    await click(document.querySelector('[aria-label="셋째 위로"]'));
+    assert.deepEqual(titles(), ['첫째', '셋째', '둘째']);
+    await click(document.querySelector('[aria-label="첫째 아래로"]'));
+    assert.deepEqual(titles(), ['셋째', '첫째', '둘째']);
+    assert.deepEqual(Array.from(data.dccons, item => item.info.package_idx), [3, 1, 2]);
+    await React.act(async () => root.render(null));
+    await React.act(async () => root.render(React.createElement(DCConSettingsPanel)));
+    assert.deepEqual(titles(), ['셋째', '첫째', '둘째']);
+    await React.act(async () => root.render(React.createElement(DCConPanel, {type: 'dccon'})));
+    assert.deepEqual([...document.querySelectorAll('.dccon-rail-button')].slice(3, 6).map(node => node.title), ['셋째', '첫째', '둘째']);
     assert.deepEqual(errors, []);
   });
 });
