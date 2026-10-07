@@ -10,7 +10,7 @@ $ErrorActionPreference = 'Stop'
 $Channel = if ($Channel -eq 'Canary') {'Canary'} else {'Stable'}
 if (!$DiscordRoot) {$DiscordRoot = Join-Path $env:LOCALAPPDATA $(if ($Channel -eq 'Canary') {'DiscordCanary'} else {'Discord'})}
 $root = [IO.Path]::GetFullPath($DiscordRoot)
-if (Get-Process -Name Discord,DiscordCanary -ErrorAction SilentlyContinue | Where-Object { $_.Path -and $_.Path.StartsWith($root + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase) }) {
+if (Get-Process -Name Discord,DiscordCanary -ErrorAction SilentlyContinue | Where-Object { $_.Path -and [IO.Path]::GetFullPath($_.Path).StartsWith($root + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase) }) {
     throw "Fully quit Discord $Channel before installing or restoring."
 }
 $version = Get-ChildItem -LiteralPath $root -Directory |

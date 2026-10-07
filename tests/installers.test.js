@@ -63,8 +63,12 @@ test('Canary selects its default directory, leaves Stable untouched, and blocks 
     await fs.writeFile(path.join(resources, 'app.asar'), client);
   }
   const wrapper = path.join(dir, 'canary-test.ps1');
-  await fs.writeFile(wrapper, `param([Alias('Restore')][switch]$Remove)
+  await fs.writeFile(wrapper, `param([Alias('Restore')][switch]$Remove, [switch]$ShortPath)
 $ErrorActionPreference='Stop'
+if ($ShortPath) {
+  $folder = (New-Object -ComObject Scripting.FileSystemObject).GetFolder((Split-Path $env:DCCON_TEST_PROCESS))
+  $env:DCCON_TEST_PROCESS = Join-Path $folder.ShortPath (Split-Path $env:DCCON_TEST_PROCESS -Leaf)
+}
 function Get-Process {
   param($Name,$ErrorAction)
   if ($Name -notcontains 'DiscordCanary') {throw 'Canary process was not checked'}
@@ -81,10 +85,12 @@ function Get-Process {
   assert.equal(JSON.parse(await fs.readFile(path.join(canary, 'app/discord-dccon-install.json'), 'utf8')).channel, 'Canary');
   assert.equal(await fs.readFile(path.join(dir, 'Discord/app-1.0.1/resources/app.asar'), 'utf8'), 'Discord');
   env.DCCON_TEST_PROCESS = path.join(dir, 'DiscordCanary/app-1.0.1/DiscordCanary.exe');
-  result = invoke(['-Remove']);
-  assert.notEqual(result.status, 0);
-  assert.match(result.stderr, /Fully quit Discord Canary/);
-  await fs.access(path.join(canary, 'app/index.js'));
+  for (const args of [['-Remove'], ['-Remove', '-ShortPath']]) {
+    result = invoke(args);
+    assert.notEqual(result.status, 0, result.stdout);
+    assert.match(result.stderr, /Fully quit Discord Canary/);
+    await fs.access(path.join(canary, 'app/index.js'));
+  }
   env.DCCON_TEST_PROCESS = '';
   result = invoke(['-Remove']);
   assert.equal(result.status, 0, result.stderr);
