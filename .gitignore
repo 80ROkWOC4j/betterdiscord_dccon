@@ -1,0 +1,16 @@
+.history/
+node_modules/
+
+# Local user data and generated files
+*.config.json
+*.backup-*
+*.log
+*.tmp
+.env
+.env.*
+
+# Local historical source and reproduction tests
+upstream
+
+# Generated UI previews (documentation images live in images)
+/artifacts/ui-previews/

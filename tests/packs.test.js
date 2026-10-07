@@ -1,0 +1,232 @@
+const {test} = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const vm = require('node:vm');
+const {JSDOM} = require('jsdom');
+const React = require('react');
+
+function pack(id, title = '고양이콘') {
+  return {info: {package_idx: id, title, main_img_path: '', list_img_path: ''}, detail: []};
+}
+
+async function scenario(file, initial, run) {
+  const dom = new JSDOM('<!doctype html><div id="root"></div>');
+  global.window = dom.window;
+  global.document = dom.window.document;
+  global.IS_REACT_ACT_ENVIRONMENT = true;
+  const {createRoot} = require('react-dom/client');
+  const data = {dccons: initial};
+  const uploads = [];
+  const nativeUploads = [];
+  let requests = 0;
+  const context = {module: {exports: {}}, structuredClone, Blob, File, URL, BdApi: {
+    React,
+    // Deliberately return the SAME object, as a cached BetterDiscord store can.
+    Data: {load: (_, key) => data[key], save: (_, key, value) => { data[key] = value; }},
+    Net: {fetch: async () => { requests++; return {text: async () => JSON.stringify(pack(42)), arrayBuffer: async () => new Uint8Array([1, 2, 3]).buffer}; }},
+    UI: {showToast() {}}, Logger: {error: (...args) => { throw Error(args.join(' ')); }},
+    DOM: {addStyle() {}},
+    Webpack: {getByKeys: () => ({locale: 'ko', addChangeListener() {}}), getStore: () => ({getUploads: () => nativeUploads}), getModule: () => ({addFiles: args => { uploads.push(args); nativeUploads.push({id: String(uploads.length), item: args.files[0]}); }}), Filters: {byKeys: () => () => true}},
+  }};
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname, '..', file), 'utf8') +
+    '\nmodule.exports = {DCConSettingsPanel, Plugin: module.exports, DCConPanel, DCConItem, BufferTray: typeof BufferTray === "undefined" ? null : BufferTray, sendDCConMessage, PackThumbnail: typeof PackThumbnail === "undefined" ? null : PackThumbnail, events: PluginEvents, setChannel: id => { currentChannelId = id; }};', context);
+  const {DCConSettingsPanel, Plugin} = context.module.exports;
+  const root = createRoot(document.getElementById('root'));
+  const ref = React.createRef();
+  const errors = [];
+  const originalError = console.error;
+  console.error = (...args) => errors.push(args.join(' '));
+  const click = async element => {
+    assert.ok(element);
+    await React.act(async () => element.dispatchEvent(new window.MouseEvent('click', {bubbles: true})));
+  };
+  try {
+    await React.act(async () => root.render(React.createElement(DCConSettingsPanel, {ref})));
+    await run({data, errors, ref, click, requests: () => requests, Plugin, root, uploads, DCConSettingsPanel, ...context.module.exports});
+  } finally {
+    await React.act(async () => root.unmount());
+    console.error = originalError;
+    dom.window.close();
+    delete global.window;
+    delete global.document;
+    delete global.IS_REACT_ACT_ENVIRONMENT;
+  }
+}
+
+async function searchResult(ref) {
+  await React.act(async () => ref.current.setState({activeTab: 'shop', searchResults: [
+    {idx: '42', name: '고양이콘', seller: '테스트', thumbId: ''},
+  ]}));
+}
+
+test('one add and a rapid repeated remove keep storage and UI synchronized without changing tabs', async () => {
+  await scenario('DCCon.plugin.js', [], async ({data, ref, click, errors, requests}) => {
+    await searchResult(ref);
+    const add = document.querySelector('.dccon-card button');
+    await React.act(async () => {
+      add.dispatchEvent(new window.MouseEvent('click', {bubbles: true}));
+      add.dispatchEvent(new window.MouseEvent('click', {bubbles: true}));
+    });
+    assert.equal(requests(), 1);
+    assert.equal(data.dccons.length, 1);
+    assert.equal(document.querySelector('.dccon-card button').disabled, true);
+    await click(document.querySelector('.dccon-tab-item'));
+    assert.equal(document.querySelectorAll('.dccon-card').length, 1);
+    const remove = document.querySelector('.dccon-card button');
+    await React.act(async () => {
+      remove.dispatchEvent(new window.MouseEvent('click', {bubbles: true}));
+      remove.dispatchEvent(new window.MouseEvent('click', {bubbles: true}));
+    });
+    assert.equal(data.dccons.length, 0);
+    assert.equal(document.querySelectorAll('.dccon-card').length, 0);
+    assert.ok(document.querySelector('.dccon-empty-state'));
+    await searchResult(ref);
+    await click(document.querySelector('.dccon-card button'));
+    await click(document.querySelector('.dccon-tab-item'));
+    assert.equal(document.querySelectorAll('.dccon-card').length, 1);
+    assert.deepEqual(errors, []);
+  });
+});
+
+test('existing numeric/string duplicate IDs render once and removal preserves other packs', async () => {
+  await scenario('DCCon.plugin.js', [pack(42), pack('42'), pack(99, '다른 팩')], async ({data, click, errors}) => {
+    assert.equal(document.querySelectorAll('.dccon-card').length, 2);
+    await click(document.querySelector('.dccon-card button'));
+    assert.equal(data.dccons.length, 1);
+    assert.equal(String(data.dccons[0].info.package_idx), '99');
+    assert.equal(document.querySelectorAll('.dccon-card').length, 1);
+    assert.equal(document.querySelector('.dccon-card h3').textContent, '다른 팩');
+    assert.deepEqual(errors, []);
+  });
+});
+
+test('startup repairs stored duplicates once and retains the original data backup', async () => {
+  await scenario('DCCon.plugin.js', [pack(42), pack('42'), pack(99)], async ({data, Plugin}) => {
+    const plugin = new Plugin({name: 'DCCon'});
+    plugin.patchChannelTextArea = () => {};
+    plugin.start();
+    assert.equal(data.dccons.length, 2);
+    assert.equal(data.dcconsBeforeDedup.length, 3);
+    const backup = JSON.stringify(data.dcconsBeforeDedup);
+    plugin.start();
+    assert.equal(data.dccons.length, 2);
+    assert.equal(JSON.stringify(data.dcconsBeforeDedup), backup);
+  });
+});
+
+test('favorite star persists, appears in favorites, and removes immediately without attaching', async () => {
+  const saved = pack(42);
+  saved.detail = [{idx: '7', title: '안녕', path: 'image-path', ext: 'png'}];
+  await scenario('DCCon.plugin.js', [saved], async ({root, DCConPanel, data, click, requests, errors}) => {
+    await React.act(async () => root.render(React.createElement(DCConPanel, {type: 'dccon'})));
+    await click(document.querySelector('.dccon-favorite'));
+    assert.equal(data.favorites.length, 1);
+    assert.equal(data.favorites[0].packageIdx, 42);
+    assert.equal(requests(), 0);
+    await click(document.querySelector('[aria-label="즐겨찾기"]'));
+    assert.equal(document.querySelectorAll('.dccon-item').length, 1);
+    await click(document.querySelector('.dccon-favorite'));
+    assert.equal(data.favorites.length, 0);
+    assert.equal(document.querySelectorAll('.dccon-item').length, 0);
+    assert.ok(document.querySelector('.dccon-empty-state'));
+    assert.deepEqual(errors, []);
+  });
+});
+
+test('attachment-only clicks preserve picker and recent history stays unique', async () => {
+  await scenario('DCCon.plugin.js', [], async ({root, DCConItem, events, setChannel, uploads, data, errors}) => {
+    setChannel('channel-test');
+    data.attachOnly = true;
+    let closes = 0;
+    events.subscribe('DCCON_CLOSE', () => closes++);
+    await React.act(async () => root.render(React.createElement(DCConItem, {
+      con: {idx: '7', title: '안녕', path: 'image-path', ext: 'gif'}, packageIdx: 42,
+    })));
+    await React.act(async () => document.querySelector('.dccon-item').dispatchEvent(new window.MouseEvent('click', {bubbles: true, shiftKey: true})));
+    assert.equal(uploads.length, 1);
+    assert.equal(uploads[0].channelId, 'channel-test');
+    assert.equal(uploads[0].files[0].file.type, 'image/gif');
+    assert.equal(closes, 0);
+    await React.act(async () => document.querySelector('.dccon-item').dispatchEvent(new window.MouseEvent('click', {bubbles: true})));
+    assert.equal(uploads.length, 2);
+    assert.equal(closes, 0);
+    assert.equal(data.recent.length, 1);
+    assert.deepEqual(errors, []);
+  });
+});
+
+test('thumbnail uses cover and falls back from a 1px image, then to a label on errors', async () => {
+  await scenario('DCCon.plugin.js', [], async ({root, PackThumbnail, errors}) => {
+    const saved = pack(42);
+    saved.info.main_img_path = 'cover';
+    saved.info.list_img_path = 'list';
+    saved.detail = [{path: 'first-con'}];
+    await React.act(async () => root.render(React.createElement(PackThumbnail, {pack: saved})));
+    let image = document.querySelector('img');
+    assert.ok(image.src.endsWith('cover'));
+    Object.defineProperty(image, 'naturalWidth', {configurable: true, value: 1});
+    await React.act(async () => image.dispatchEvent(new window.Event('load')));
+    assert.ok(document.querySelector('img').src.endsWith('first-con'));
+    await React.act(async () => image.dispatchEvent(new window.Event('error')));
+    assert.ok(document.querySelector('img').src.endsWith('list'));
+    await React.act(async () => image.dispatchEvent(new window.Event('error')));
+    assert.equal(document.querySelector('img'), null);
+    assert.equal(document.getElementById('root').textContent, '고');
+    assert.deepEqual(errors, []);
+  });
+});
+
+test('diagnostic tab displays a copyable report without uploading or modifying saved data', async () => {
+  await scenario('DCCon.plugin.js', [pack(42)], async ({data, click, requests, uploads, errors, root, DCConSettingsPanel}) => {
+    const before = JSON.stringify(data);
+    await React.act(async () => root.render(React.createElement(DCConSettingsPanel, {section: 'settings'})));
+    await click(document.querySelector('.dccon-diagnostics button'));
+    const textarea = document.querySelector('textarea');
+    assert.equal(textarea.readOnly, true);
+    const report = JSON.parse(textarea.value);
+    assert.ok(Object.hasOwn(report, 'CloudUpload'));
+    assert.ok(Object.hasOwn(report, 'REST post/get/put/del'));
+    assert.equal(requests(), 0);
+    assert.equal(uploads.length, 0);
+    assert.equal(JSON.stringify(data), before);
+    await click([...document.querySelectorAll('.dccon-diagnostics button')].find(button => button.textContent === '제보용 정보 복사'));
+    assert.match(document.querySelector('[role="status"]').textContent, /Ctrl\+C/);
+    assert.equal(textarea.selectionEnd, textarea.value.length);
+    assert.deepEqual(errors, []);
+  });
+});
+
+test('attachment-only option starts off, saves toggle changes, and sends nothing while configuring', async () => {
+  await scenario('DCCon.plugin.js', [], async ({data, click, requests, uploads, root, DCConSettingsPanel}) => {
+    await React.act(async () => root.render(React.createElement(DCConSettingsPanel, {section: 'settings'})));
+    const checkbox = document.querySelector('input[type="checkbox"]');
+    assert.equal(checkbox.checked, false);
+    await click(checkbox);
+    assert.equal(data.attachOnly, true);
+    await click(checkbox);
+    assert.equal(data.attachOnly, false);
+    assert.equal(requests(), 0);
+    assert.equal(uploads.length, 0);
+  });
+});
+
+test('private buffer tray shows local thumbnails, survives remount, and supports remove and clear', async () => {
+  await scenario('DCCon.plugin.js', [], async ({root, BufferTray, sendDCConMessage, setChannel, click, uploads, errors}) => {
+    setChannel('buffer-ui');
+    const con = {idx: '1', title: '안녕', path: 'test', ext: 'png'};
+    await React.act(async () => root.render(React.createElement(BufferTray, {channelId: 'buffer-ui'})));
+    await React.act(async () => { await sendDCConMessage(con, {keepOpen: true}); await sendDCConMessage(con, {keepOpen: true}); });
+    assert.equal(uploads.length, 0);
+    assert.equal(document.querySelectorAll('.dccon-buffer img').length, 2);
+    assert.ok(document.querySelector('.dccon-buffer img').src.startsWith('blob:'));
+    await React.act(async () => root.render(null));
+    await React.act(async () => root.render(React.createElement(BufferTray, {channelId: 'buffer-ui'})));
+    assert.equal(document.querySelectorAll('.dccon-buffer img').length, 2);
+    await click(document.querySelector('[aria-label="안녕 제거"]'));
+    assert.match(document.querySelector('[role="status"]').textContent, /1\/9/);
+    await click(document.querySelector('.dccon-buffer-heading button'));
+    assert.equal(document.querySelector('.dccon-buffer'), null);
+    assert.deepEqual(errors, []);
+  });
+});
