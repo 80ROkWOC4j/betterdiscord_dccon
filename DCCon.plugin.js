@@ -1,7 +1,7 @@
 /**
  * @name DCCon
  * @description 디스코드에서 디시콘을 쉽게 사용할 수 있게 도와주는 플러그인입니다.
- * @version 2.5.1
+ * @version 2.6.0
  * @author 80ROkWOC4j
  * @website https://github.com/80ROkWOC4j/betterdiscord_dccon
  * @source https://github.com/80ROkWOC4j/betterdiscord_dccon
@@ -302,11 +302,20 @@ async function getDCConImage(con) {
     let fs, cachePath;
     try {
       if (typeof require === "function" && BdApi.Plugins?.folder) {
-        fs = require("fs").promises;
+        // BetterDiscord's fs polyfill exposes callbacks, not fs.promises.
+        const filesystem = require("fs");
+        fs = Object.fromEntries(["readFile", "mkdir", "writeFile", "rename"].map(method => [method,
+          (...args) => new Promise((resolve, reject) => filesystem[method](...args,
+            (error, result) => error ? reject(error) : resolve(result))),
+        ]));
         const directory = require("path").join(BdApi.Plugins.folder, "DCCon-cache");
         cachePath = require("path").join(directory, require("crypto").createHash("sha256").update(key).digest("hex"));
-        const cached = await fs.readFile(cachePath);
-        if (cached.length) return new File([cached], `dccon.${con.ext}`, { type: `image/${con.ext}` });
+        const cached = await fs.readFile(cachePath, null);
+        // BetterDiscord defaults to UTF-8, unlike Node. Never construct an image from text.
+        if (typeof cached === "string") throw Object.assign(new Error("Cache returned text"), {code: "CACHE_NOT_BINARY"});
+        if (cached.length) {
+          return new File([cached], `dccon.${con.ext}`, { type: `image/${con.ext}` });
+        }
       }
     } catch { /* Missing or unreadable cache: fetch the original. */ }
     const response = await BdApi.Net.fetch(DCConBaseURL + con.path, {
@@ -322,7 +331,9 @@ async function getDCConImage(con) {
         await fs.mkdir(require("path").dirname(cachePath), { recursive: true });
         await fs.writeFile(cachePath + ".tmp", bytes);
         await fs.rename(cachePath + ".tmp", cachePath);
-      } catch (error) { BdApi.Logger.error("DCCon", "Image cache write failed", error); }
+      } catch (error) {
+        BdApi.Logger.error("DCCon", "Image cache write failed", error);
+      }
     }
     return new File([bytes], `dccon.${con.ext}`, { type: `image/${con.ext}` });
   })();
@@ -411,7 +422,7 @@ async function sendImagesDirectly(files, channelId, attempt) {
   };
   const attachments = [];
   for (const [index, file] of files.entries()) {
-    markSend(attempt, "업로드 객체 생성", { attachmentIndex: index + 1, attachmentCount: files.length });
+    markSend(attempt, "업로드 객체 생성", { attachmentIndex: index + 1, attachmentCount: files.length, imageBytes: files.reduce((sum, image) => sum + image.size, 0) });
     const upload = new CloudUpload({ file, isThumbnail: false, platform: 1 }, channelId);
     markSend(attempt, "Discord 파일 업로드", {
       listenerCleanup: typeof upload.off === "function" ? "off" : typeof upload.removeListener === "function" ? "removeListener" : "none",
@@ -444,6 +455,10 @@ async function sendImagesDirectly(files, channelId, attempt) {
     if (!upload.uploadedFilename) throw new Error("업로드 결과에 파일 경로가 없습니다.");
     attachments.push({ id: String(index), filename: upload.filename || file.name, uploaded_filename: upload.uploadedFilename });
   }
+  await postDCCon(rest, channelId, attempt, attachments);
+}
+
+async function postDCCon(rest, channelId, attempt, attachments = [], content = "") {
   const timestampNonce = (BigInt(Date.now()) - 1420070400000n) << 22n;
   lastMessageNonce = timestampNonce > lastMessageNonce ? timestampNonce : lastMessageNonce + 1n;
   // Send only plugin-owned files; leave composer text and reply untouched.
@@ -451,7 +466,7 @@ async function sendImagesDirectly(files, channelId, attempt) {
   const response = await rest.post({
     url: `/channels/${channelId}/messages`,
     body: {
-      content: "", nonce: String(lastMessageNonce), enforce_nonce: true,
+      content, nonce: String(lastMessageNonce), enforce_nonce: true,
       type: 0, sticker_ids: [], allowed_mentions: { parse: [] },
       attachments,
     },
@@ -468,36 +483,76 @@ async function sendImagesDirectly(files, channelId, attempt) {
   if (!response?.body?.id) throw new Error("전송 성공을 확인할 수 없습니다. 채널과 진단 결과를 확인해 주세요. 자동 재전송하지 않습니다.");
 }
 
+function sendMode() {
+  const selected = loadData("sendMode", null);
+  if (["image", "link", "attach"].includes(selected)) return selected;
+  const legacyAttachOnly = loadData("attachOnly", null);
+  if (typeof legacyAttachOnly === "boolean") return legacyAttachOnly ? "attach" : "image";
+  return "link";
+}
+let bufferGeneration = 0;
+function changeSendMode(mode) {
+  if (mode === sendMode()) return;
+  saveData("sendMode", mode);
+  bufferGeneration++;
+  queuedCons.clear();
+  PluginEvents.dispatch({type: "DCCON_BUFFER_UPDATE"});
+}
+async function sendLinkDirectly(con, channelId, attempt) {
+  const content = DCConProxyURL + encodeURIComponent(con.path);
+  if (content.length > 2000) throw new Error("디시콘 링크가 메시지 길이 제한을 초과합니다.");
+  markSend(attempt, "링크 전송 모듈 조회", {linkCount: 1});
+  const rest = BdApi.Webpack.getModule(isDiscordRest, {searchExports: true});
+  if (!rest) throw new Error("메시지 전송 모듈을 찾지 못했습니다.");
+  await postDCCon(rest, channelId, attempt, [], content);
+}
+
 // 디시콘 메시지 전송 함수
 const sendDCConMessage = (con, { keepOpen = false } = {}) => {
+  const startedAt = new Date().toISOString();
   const channelId = currentChannelId;
-  const attachOnly = loadData("attachOnly", false) === true;
+  const mode = sendMode();
+  const attachOnly = mode === "attach";
+  const linkMode = mode === "link";
+  if (linkMode) keepOpen = false;
+  const generation = bufferGeneration;
   if (sendingChannels.has(channelId)) return Promise.resolve(false);
   const sending = !attachOnly && !keepOpen;
   if (sending) sendingChannels.add(channelId);
   PluginEvents.dispatch({ type: "DCCON_BUFFER_UPDATE", channelId });
+  const attempt = { startedAt, outcome: "진행 중", keepOpen, phase: "작업 대기",
+    mode: attachOnly ? "첨부 누적" : keepOpen ? "버퍼 누적" : linkMode ? "링크 즉시 전송" : "누적 즉시 전송" };
   const task = (channelTasks.get(channelId) ?? Promise.resolve()).then(async () => {
-    const attempt = { startedAt: new Date().toISOString(), outcome: "진행 중", keepOpen,
-      mode: attachOnly ? "첨부 누적" : keepOpen ? "버퍼 누적" : "누적 즉시 전송" };
     lastSendAttempt = attempt;
     try {
+      if (generation !== bufferGeneration) { attempt.outcome = "모드 변경으로 취소"; return false; }
       markSend(attempt, "채널 확인", { hasChannel: Boolean(channelId) });
       if (!channelId) throw new Error("현재 채널을 찾을 수 없습니다.");
       if (!attachOnly && keepOpen && activeQueue(channelId).length >= 9)
         throw new Error("최대 9개까지 모을 수 있습니다. 일반 클릭으로 마지막 콘과 함께 보내세요.");
       markSend(attempt, "캐시 / 이미지 준비");
-      const image = await getDCConImage(con);
+      const image = linkMode ? null : await getDCConImage(con);
+      attempt.imageBytes = image?.size ?? 0;
+      if (generation !== bufferGeneration) { attempt.outcome = "모드 변경으로 취소"; return false; }
+      markSend(attempt, "전송 준비");
       let sentCons = [con];
       if (attachOnly) {
+        markSend(attempt, "입력창 첨부");
         await stageCon(channelId, image);
         markSend(attempt, "완료", { outcome: "첨부 누적 완료" });
       } else if (keepOpen) {
+        markSend(attempt, "버퍼 추가");
         updateQueue(channelId, [...activeQueue(channelId), {file: image, con}]);
         markSend(attempt, "완료", { outcome: "버퍼 누적 완료", queuedCount: activeQueue(channelId).length });
       } else {
-        const queued = activeQueue(channelId);
-        await sendImagesDirectly([...queued.map(entry => entry.file), image], channelId, attempt);
-        updateQueue(channelId, []);
+        const queued = linkMode ? [] : activeQueue(channelId);
+        if (linkMode) await sendLinkDirectly(con, channelId, attempt);
+        else {
+          const files = [];
+          for (const entry of queued) files.push(entry.file);
+          await sendImagesDirectly([...files, image], channelId, attempt);
+        }
+        if (generation === bufferGeneration) updateQueue(channelId, []);
         sentCons = [...queued.map(entry => entry.con), con];
         markSend(attempt, "완료", { outcome: "전송 성공 확인", sentCount: sentCons.length });
       }
@@ -688,7 +743,7 @@ class DCConItem extends BdApi.React.Component {
     const h = BdApi.React.createElement;
     const { con } = this.props;
     return h("div", { className: "dccon-tile" },
-      h("button", { type: "button", title: con.title + " · Shift+클릭: 계속 첨부",
+      h("button", { type: "button", title: con.title + (sendMode() === "link" ? " · 클릭: 링크 하나 전송" : sendMode() === "attach" ? " · 클릭: 첨부파일 추가" : " · Shift+클릭: 모아두기"),
         "aria-label": con.title, className: "dccon-item", disabled: this.state.busy || this.state.error,
         onClick: event => this.attach(event),
       }, this.state.error ? h("span", { className: "dccon-item-error" }, "이미지 로드 실패")
@@ -780,8 +835,9 @@ class DCConPanel extends BdApi.React.Component {
         )
       ),
       h(BufferTray, {channelId: currentChannelId}),
-      h("div", { className: "dccon-footer" }, loadData("attachOnly", false)
+      h("div", { className: "dccon-footer" }, sendMode() === "attach"
         ? "첨부 전용 · 클릭 / Shift+클릭: 첨부 누적 · 창 유지"
+        : sendMode() === "link" ? "링크 전송 · 클릭 / Shift+클릭: 한 개씩 즉시 전송"
         : "클릭: 누적 콘과 함께 전송 · Shift+클릭: 모아두기 (최대 9개)")
     );
   }
@@ -1029,7 +1085,7 @@ class DCConSettingsPanel extends BdApi.React.Component {
       searchResults: [],
       isSearching: false,
       savedDccons: loadPacks(),
-      attachOnly: loadData("attachOnly", false) === true,
+      sendMode: sendMode(),
     };
 
     this.handleSearch = this.handleSearch.bind(this);
@@ -1109,16 +1165,18 @@ class DCConSettingsPanel extends BdApi.React.Component {
 
   renderOptions() {
     const h = BdApi.React.createElement;
-    return h("div", { className: "dccon-options" },
-      h("h3", null, "전송 방식"),
-      h("label", null,
-        h("input", { type: "checkbox", checked: this.state.attachOnly, onChange: event => {
-          const attachOnly = event.target.checked;
-          saveData("attachOnly", attachOnly);
-          this.setState({ attachOnly });
-        } }), " 첨부 전용 모드"),
-      h("p", null, "클릭한 콘을 입력창에 첨부합니다. 내용을 확인한 뒤 직접 전송하고 싶을 때 켜세요. Shift+클릭도 동일하게 작동합니다."),
-      h("p", null, "끄면 일반 클릭으로 즉시 전송합니다. Shift+클릭으로 모아둔 콘이 있으면 함께 보냅니다.")
+    return h("fieldset", { className: "dccon-options" },
+      h("legend", null, "디시콘 클릭 동작"),
+      ...[
+        ["link", "클릭 시 링크 전송(빠름)", "링크 바로 보냅니다. 디스코드 이미지 임베딩에 의존합니다."],
+        ["image", "클릭 시 이미지 전송", "이미지를 바로 보냅니다. Shift+클릭으로 모은 콘은 다음 일반 클릭 때 함께 전송합니다. 공앱 같은 작동."],
+        ["attach", "클릭 시 첨부파일 추가", "입력창에 파일을 추가합니다. Shift+클릭도 동일합니다."],
+      ].map(([mode, title, description]) => h("label", {key: mode, className: "dccon-mode-choice"},
+        h("input", {type: "radio", name: "dccon-send-mode", value: mode, checked: this.state.sendMode === mode,
+          onChange: () => { changeSendMode(mode); this.setState({sendMode: mode}); }}),
+        h("span", null, h("strong", null, title), h("small", null, description)))),
+      h("p", null, "전송 방식을 변경하면 모든 채널에서 입력하려고 모아둔 콘 버퍼가 비워집니다."),
+      this.state.sendMode === "link" && h("p", null, "링크 전송은 디시콘 원본 이미지 링크를 보냅니다.")
     );
   }
 
@@ -1132,7 +1190,11 @@ class DCConSettingsPanel extends BdApi.React.Component {
         h("li", null, "아래에서 진단 정보를 생성하고 복사해 주세요."),
         h("li", null, "복사한 정보와 재현 순서를 버그 제보에 함께 붙여넣어 주세요.")),
       h("p", null, "진단은 자동으로 제출되지 않으며, 메시지를 보내거나 입력 중인 내용을 변경하지 않습니다."),
-      h(Button, { text: this.state.diagnosticReport ? "진단 정보 새로고침" : "진단 정보 만들기", onClick: () => this.setState({ diagnosticReport: JSON.stringify({ pluginVersion: "2.5.1", generatedAt: new Date().toISOString(), attachOnly: loadData("attachOnly", false) === true, ...inspectInstantSend() }, null, 2), copyStatus: "" }) }),
+      h(Button, { text: this.state.diagnosticReport ? "진단 정보 새로고침" : "진단 정보 만들기", onClick: () => {
+        const report = inspectInstantSend();
+        this.setState({ diagnosticReport: JSON.stringify({ pluginVersion: "2.6.0", generatedAt: new Date().toISOString(), sendMode: sendMode(), ...report }, null, 2),
+          copyStatus: "" });
+      } }),
       this.state.diagnosticReport && h("div", null,
         h("textarea", { className: "dccon-diagnostic-report", "aria-label": "진단 결과", readOnly: true,
           value: this.state.diagnosticReport, ref: element => { this.reportInput = element; }, onFocus: event => event.target.select(),
@@ -1367,8 +1429,14 @@ module.exports = class DCCon {
 .dccon-user-settings h3 { margin: 0 0 12px; font-size: 16px; color: var(--dc-text); }
 .dccon-user-settings .dccon-diagnostics { border-top: 1px solid #80808033; margin-top: 20px; padding-top: 20px; }
 .dccon-report-steps { padding-left: 20px; color: var(--dc-muted); line-height: 1.7; margin: 0 0 12px; }
-.dccon-options label { display: flex; align-items: center; gap: 8px; font-weight: 600; cursor: pointer; }
-.dccon-options input { accent-color: var(--dc-accent); width: 18px; height: 18px; }
+.dccon-options { border: 0; margin: 0; padding: 0; min-width: 0; }
+.dccon-options legend { font-size: 16px; font-weight: 600; padding: 0 0 12px; }
+.dccon-mode-choice { display: flex; align-items: flex-start; gap: 10px; padding: 12px; margin-bottom: 8px; border: 1px solid #80808044; border-radius: 8px; cursor: pointer; background: var(--dc-inset); }
+.dccon-mode-choice:has(input:checked) { border-color: var(--dc-accent); background: var(--dc-selected); }
+.dccon-mode-choice:focus-within { outline: 2px solid var(--dc-accent); outline-offset: 2px; }
+.dccon-mode-choice input { accent-color: var(--dc-accent); flex-shrink: 0; width: 18px; height: 18px; margin: 2px 0 0; }
+.dccon-mode-choice strong { display: block; font-size: 14px; }
+.dccon-mode-choice small { display: block; color: var(--dc-muted); font-size: 12px; margin-top: 5px; line-height: 1.5; }
 .dccon-options p { color: var(--dc-muted); margin: 12px 0; }
 .dccon-diagnostics p { color: var(--dc-muted); margin: 0 0 12px; }
 .dccon-diagnostic-report { display: block; width: 100%; min-height: 240px; box-sizing: border-box; resize: vertical; margin: 12px 0; padding: 10px; background: var(--dc-inset); color: var(--dc-text); border: 1px solid #80808033; border-radius: 4px; font: 12px/1.5 monospace; user-select: text; }

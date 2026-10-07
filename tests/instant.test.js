@@ -5,9 +5,9 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 const path = require('node:path');
 
-function harness({uploadFails = false, postFails = false, missing = false, cleanupFails = false, noAcknowledgement = false, postRejects = false, htmlResponse = false, functionDecoy = false, onUpload, cacheDirectory, fetchFails = false} = {}) {
+function harness({uploadFails = false, postFails = false, missing = false, cleanupFails = false, noAcknowledgement = false, postRejects = false, htmlResponse = false, functionDecoy = false, onUpload, cacheDirectory, fetchFails = false, callbackFs = false, cacheWriteFails = false, downloadBytes = [1, 2, 3]} = {}) {
   const calls = {staged: 0, posts: [], closes: 0, errors: [], uploads: [], fetches: 0};
-  const data = {instantSend: true, draft: '작성 중인 글', attachments: ['existing'], reply: 'reply-id'};
+  const data = {sendMode: "image", draft: '작성 중인 글', attachments: ['existing'], reply: 'reply-id'};
   class Upload extends EventEmitter {
     constructor(item, channelId) { super(); this.filename = item.file.name; calls.uploads.push({item, channelId, instance: this}); }
     trackUploadFinished() {}
@@ -41,16 +41,28 @@ function harness({uploadFails = false, postFails = false, missing = false, clean
   if (functionDecoy) modules.unshift(Object.assign(function WrongRest() {}, {
     get() {}, put() {}, del() {}, post() { throw new Error('wrong REST module'); },
   }));
-  const context = {require, URL, module: {exports: {}}, Blob, File, structuredClone, setTimeout, clearTimeout, BdApi: {
+  // Match BetterDiscord: callbacks wrap synchronous filesystem operations; no promises export.
+  const polyfillFs = Object.fromEntries(['readFile', 'mkdir', 'writeFile', 'rename'].map(method => [method,
+    (...args) => {
+      const callback = args.pop();
+      try {
+        if (cacheWriteFails && method === 'writeFile') throw Object.assign(new Error('private/path'), {code: 'EACCES'});
+        if (method === 'readFile' && args[1] === undefined) args[1] = 'utf-8';
+        callback(null, fs[method + 'Sync'](...args));
+      } catch (error) { callback(error, null); }
+    },
+  ]));
+  const pluginRequire = name => name === 'fs' && callbackFs ? polyfillFs : require(name);
+  const context = {require: pluginRequire, URL, module: {exports: {}}, Blob, File, structuredClone, setTimeout, clearTimeout, BdApi: {
     Plugins: {folder: cacheDirectory}, React: {Component: class {}},
     Data: {load: (_, key) => data[key], save: (_, key, value) => { data[key] = value; }},
     Webpack: {getStore: () => ({getUploads: getDraft}), getModule: filter => modules.find(filter), getByKeys: () => ({}),
       Filters: {byKeys: (...keys) => value => keys.every(key => key in value)}},
-    Net: {fetch: async () => { calls.fetches++; if (fetchFails) throw new Error('offline'); return {arrayBuffer: async () => new Uint8Array([1, 2, 3]).buffer}; }},
+    Net: {fetch: async () => { calls.fetches++; if (fetchFails) throw new Error('offline'); return {arrayBuffer: async () => new Uint8Array(downloadBytes).buffer}; }},
     UI: {showToast: text => calls.errors.push(text)}, Logger: {error() {}},
   }};
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../DCCon.plugin.js'), 'utf8') +
-    '\nmodule.exports = {sendDCConMessage, inspectInstantSend, events: PluginEvents, activeQueue, removeBuffered, getDCConImage, setChannel: id => {currentChannelId = id;}};', context);
+    '\nmodule.exports = {sendDCConMessage, inspectInstantSend, changeSendMode, events: PluginEvents, activeQueue, removeBuffered, getDCConImage, setChannel: id => {currentChannelId = id;}};', context);
   const api = context.module.exports;
   api.setChannel('test-channel');
   api.events.subscribe('DCCON_CLOSE', () => calls.closes++);
@@ -110,6 +122,7 @@ for (const failure of ['uploadFails', 'postFails', 'missing']) {
 
 test('attachment-only option stages both click types without closing or sending', async () => {
   const {api, calls, data} = harness();
+  delete data.sendMode;
   data.attachOnly = true;
   assert.equal(await api.sendDCConMessage(con), true);
   await api.sendDCConMessage(con, {keepOpen: true});
@@ -265,4 +278,110 @@ test('empty cache file is fetched again; unsafe image identifiers stay within ca
   fs.writeFileSync(path.join(cache, name), '');
   await api.getDCConImage(unsafe);
   assert.equal(calls.fetches, 2);
+});
+
+test('BetterDiscord callback-only fs caches bytes across reload and works offline', async t => {
+  const directory = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'dccon-polyfill-test-'));
+  t.after(() => fs.rmSync(directory, {recursive: true, force: true}));
+  const first = harness({cacheDirectory: directory, callbackFs: true});
+  await first.api.sendDCConMessage(con);
+  assert.equal(first.calls.fetches, 1);
+  const next = harness({cacheDirectory: directory, callbackFs: true, fetchFails: true});
+  assert.equal(await next.api.sendDCConMessage(con), true);
+  assert.equal(next.calls.fetches, 0);
+  assert.deepEqual([...new Uint8Array(await next.calls.uploads[0].item.file.arrayBuffer())], [1, 2, 3]);
+});
+
+test('cache write errors do not prevent sending', async t => {
+  const directory = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'dccon-polyfill-test-'));
+  t.after(() => fs.rmSync(directory, {recursive: true, force: true}));
+  const {api} = harness({cacheDirectory: directory, callbackFs: true, cacheWriteFails: true});
+  assert.equal(await api.sendDCConMessage(con), true);
+  assert.equal(api.inspectInstantSend().lastSendAttempt.outcome, '전송 성공 확인');
+});
+
+test('BetterDiscord UTF-8 default cannot corrupt binary image bytes after cache reload', async t => {
+  const directory = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'dccon-binary-test-'));
+  t.after(() => fs.rmSync(directory, {recursive: true, force: true}));
+  const bytes = [137, 80, 78, 71, 13, 10, 26, 10, 0, 255, 128, 254];
+  const first = harness({cacheDirectory: directory, callbackFs: true, downloadBytes: bytes});
+  await first.api.getDCConImage(con);
+  const cached = fs.readFileSync(path.join(directory, 'DCCon-cache', fs.readdirSync(path.join(directory, 'DCCon-cache'))[0]));
+  assert.deepEqual([...cached], bytes);
+  const second = harness({cacheDirectory: directory, callbackFs: true, fetchFails: true});
+  assert.equal(await second.api.sendDCConMessage(con), true);
+  const uploaded = second.calls.uploads[0].item.file;
+  assert.equal(uploaded.size, bytes.length);
+  assert.deepEqual([...new Uint8Array(await uploaded.arrayBuffer())], bytes);
+  assert.equal(second.calls.fetches, 0);
+});
+
+test('link clicks including Shift send only one URL without staging or buffering', async () => {
+  const {api, calls, data} = harness({fetchFails: true});
+  api.changeSendMode('link');
+  assert.equal(await api.sendDCConMessage(con, {keepOpen: true}), true);
+  assert.equal(calls.posts.length, 1);
+  assert.equal(await api.sendDCConMessage({...con, path: 'second&x=1'}), true);
+  assert.equal(calls.fetches, 0);
+  assert.equal(calls.uploads.length, 0);
+  assert.equal(calls.staged, 0);
+  assert.equal(calls.posts[0].body.content, 'https://dccon-proxy.minibox.workers.dev/?no=image');
+  assert.equal(calls.posts[1].body.content, 'https://dccon-proxy.minibox.workers.dev/?no=second%26x%3D1');
+  assert.equal(calls.posts[0].body.attachments.length, 0);
+  assert.equal(calls.closes, 2);
+  assert.equal(data.draft, '작성 중인 글');
+  assert.equal(api.activeQueue('test-channel').length, 0);
+});
+
+test('link failure never buffers, retries or falls back to upload', async () => {
+  const {api, calls} = harness({postFails: true});
+  api.changeSendMode('link');
+  assert.equal(await api.sendDCConMessage(con, {keepOpen: true}), false);
+  assert.equal(api.activeQueue('test-channel').length, 0);
+  assert.equal(calls.posts.length, 1);
+  assert.equal(calls.uploads.length, 0);
+});
+
+test('mode change clears all channel buffers; reselecting current mode preserves them', async () => {
+  const {api, calls} = harness();
+  await api.sendDCConMessage(con, {keepOpen: true});
+  api.changeSendMode('image');
+  assert.equal(api.activeQueue('test-channel').length, 1);
+  api.setChannel('other');
+  await api.sendDCConMessage(con, {keepOpen: true});
+  api.changeSendMode('link');
+  assert.equal(api.activeQueue('test-channel').length, 0);
+  assert.equal(api.activeQueue('other').length, 0);
+  await api.sendDCConMessage(con);
+  assert.equal(calls.posts[0].body.content.includes('\n'), false);
+});
+
+test('changing modes cancels queued work before it can repopulate buffer', async () => {
+  const {api, calls} = harness();
+  const pending = api.sendDCConMessage(con, {keepOpen: true});
+  api.changeSendMode('link');
+  assert.equal(await pending, false);
+  assert.equal(api.activeQueue('test-channel').length, 0);
+  assert.equal(calls.posts.length, 0);
+});
+
+test('oversized single link is rejected without posting', async () => {
+  const {api, calls} = harness();
+  api.changeSendMode('link');
+  assert.equal(await api.sendDCConMessage({...con, path: 'x'.repeat(2100)}), false);
+  assert.equal(calls.posts.length, 0);
+});
+
+test('new installation defaults to links while explicit and legacy choices remain respected', async () => {
+  const {api, calls, data} = harness();
+  delete data.sendMode;
+  await api.sendDCConMessage(con);
+  assert.equal(calls.posts[0].body.attachments.length, 0);
+  assert.equal(calls.uploads.length, 0);
+  data.attachOnly = false;
+  await api.sendDCConMessage(con);
+  assert.equal(calls.posts[1].body.attachments.length, 1);
+  data.sendMode = 'link';
+  await api.sendDCConMessage(con);
+  assert.equal(calls.posts[2].body.attachments.length, 0);
 });

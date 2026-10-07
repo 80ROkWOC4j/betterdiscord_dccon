@@ -197,22 +197,23 @@ test('diagnostic tab displays a copyable report without uploading or modifying s
   });
 });
 
-test('attachment-only option starts off, saves toggle changes, and sends nothing while configuring', async () => {
+test('send mode selector persists all three modes without sending', async () => {
   await scenario('DCCon.plugin.js', [], async ({data, click, requests, uploads, root, DCConSettingsPanel}) => {
     await React.act(async () => root.render(React.createElement(DCConSettingsPanel, {section: 'settings'})));
-    const checkbox = document.querySelector('input[type="checkbox"]');
-    assert.equal(checkbox.checked, false);
-    await click(checkbox);
-    assert.equal(data.attachOnly, true);
-    await click(checkbox);
-    assert.equal(data.attachOnly, false);
+    assert.equal(document.querySelector('input[type=radio]:checked').value, 'link');
+    for (const mode of ['attach', 'image', 'link']) {
+      await click(document.querySelector('input[value=' + mode + ']'));
+      assert.equal(document.querySelector('input[type=radio]:checked').value, mode);
+      assert.equal(data.sendMode, mode);
+    }
     assert.equal(requests(), 0);
     assert.equal(uploads.length, 0);
   });
 });
 
 test('private buffer tray shows local thumbnails, survives remount, and supports remove and clear', async () => {
-  await scenario('DCCon.plugin.js', [], async ({root, BufferTray, sendDCConMessage, setChannel, click, uploads, errors}) => {
+  await scenario('DCCon.plugin.js', [], async ({root, BufferTray, sendDCConMessage, setChannel, click, uploads, errors, data}) => {
+    data.sendMode = 'image';
     setChannel('buffer-ui');
     const con = {idx: '1', title: '안녕', path: 'test', ext: 'png'};
     await React.act(async () => root.render(React.createElement(BufferTray, {channelId: 'buffer-ui'})));
