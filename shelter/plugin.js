@@ -9,7 +9,7 @@
   function start() {
     if (disposed) return;
     if (typeof globalThis.BdApi !== 'undefined') {
-      console.error('[DCCon shelter] BetterDiscord 중복 실행 감지. 기존 로더를 확인하세요.');
+      console.error('[discord-dccon shelter] BetterDiscord 중복 실행 감지. 기존 로더를 확인하세요.');
       return;
     }
     const checks = {
@@ -42,15 +42,15 @@
       const exported = {exports: {}};
       new Function('BdApi', 'require', 'module', dcconSource + '\nmodule.exports={Plugin:module.exports,Button:DCConButton};')(
         adapter.BdApi, adapter.requireNative, exported);
-      plugin = new exported.exports.Plugin({name: 'DCCon', version: dcconVersion});
+      plugin = new exported.exports.Plugin({name: 'discord-dccon', version: dcconVersion});
       plugin.patchChannelTextArea = () => {
         unmountToolbar = mountToolbar(shelter, exported.exports.Button);
       };
       plugin.start();
     } catch (error) {
       try {unmountToolbar?.(); plugin?.stop();} finally {adapter?.dispose();}
-      console.error('[DCCon shelter]', error);
-      shelter.ui.showToast({title: 'DCCon 오류', content: error.message, duration: 15000});
+      console.error('[discord-dccon shelter]', error);
+      shelter.ui.showToast({title: 'discord-dccon 오류', content: error.message, duration: 15000});
     }
   }
   return {onLoad: start, onUnload: stop};

@@ -13,7 +13,7 @@ function load(file, {components = false, missingSearchModule = true, environment
     document: {addEventListener() {}, removeEventListener() {}},
     ...environment,
     BdApi: {
-      Plugins: {get: () => ({name: 'DCCon'})},
+      Plugins: {get: () => ({name: 'discord-dccon'})},
       Data: {load: () => undefined},
       React: {
         Component: class {
@@ -43,7 +43,7 @@ function load(file, {components = false, missingSearchModule = true, environment
 }
 
 test('button and picker render with valid refs; clearing search resets the input', () => {
-  const {DCConButton, DCConPanel} = load('DCCon.plugin.js', {components: true});
+  const {DCConButton, DCConPanel} = load('discord-dccon.plugin.js', {components: true});
   assert.doesNotThrow(() => new DCConButton({}).render());
   const panel = new DCConPanel({type: 'dccon'});
   function findInput(node) {
@@ -61,7 +61,7 @@ test('button and picker render with valid refs; clearing search resets the input
 });
 
 test('patched plugin loads without the removed search CSS module', () => {
-  const Plugin = load('DCCon.plugin.js');
+  const Plugin = load('discord-dccon.plugin.js');
   assert.equal(typeof Plugin, 'function');
   const css = Object.getOwnPropertyDescriptor(Plugin.prototype, 'css').get.call({});
   assert.match(css, /\.dccon-search-input/);
@@ -73,7 +73,7 @@ test('pack navigation and search filter individual images without changing saved
     {info: {package_idx: 1, title: '고양이'}, detail: [{idx: 1, title: '안녕'}, {idx: 2, title: '잘자'}]},
     {info: {package_idx: 2, title: '강아지'}, detail: [{idx: 3, title: '안녕'}]},
   ];
-  const {DCConPanel} = load('DCCon.plugin.js', {components: true, api: {Data: {load: () => packs}}});
+  const {DCConPanel} = load('discord-dccon.plugin.js', {components: true, api: {Data: {load: () => packs}}});
   const panel = new DCConPanel({type: 'dccon'});
   panel.state.textFilter = '안녕';
   assert.equal(panel.filterDccons().length, 2);
@@ -88,7 +88,7 @@ test('pack navigation and search filter individual images without changing saved
 });
 
 test('private events update mounted components and detach on unmount', () => {
-  const {DCConButton, events} = load('DCCon.plugin.js', {components: true});
+  const {DCConButton, events} = load('discord-dccon.plugin.js', {components: true});
   const button = new DCConButton({channelId: 'test-channel'});
   const recent = {componentDidMount() { events.subscribe("DCCON_RECENT_UPDATE", update); }, componentWillUnmount() { events.unsubscribe("DCCON_RECENT_UPDATE", update); }};
   const update = () => recent.setState();
@@ -111,7 +111,7 @@ test('private events update mounted components and detach on unmount', () => {
 });
 
 test('stop notifications reach every listener even when listeners unsubscribe', () => {
-  const {events} = load('DCCon.plugin.js', {components: true});
+  const {events} = load('discord-dccon.plugin.js', {components: true});
   const calls = [];
   const first = () => {
     calls.push('first');
@@ -139,7 +139,7 @@ test('real React: click opens picker without Discord picker modules; close, mana
   global.IS_REACT_ACT_ENVIRONMENT = true;
   const ReactDOM = require('react-dom');
   const {createRoot} = require('react-dom/client');
-  const {DCConButton, events} = load('DCCon.plugin.js', {
+  const {DCConButton, events} = load('discord-dccon.plugin.js', {
     components: true,
     environment: {window: dom.window, document: dom.window.document},
     api: {React, ReactDOM},
@@ -157,7 +157,8 @@ test('real React: click opens picker without Discord picker modules; close, mana
     assert.ok(document.querySelector('.dccon-search-input'));
     assert.equal(trigger.getAttribute('aria-expanded'), 'true');
     await click(document.querySelectorAll('.dccon-popover-toolbar button')[2]);
-    assert.ok(document.querySelector('.dccon-options'));
+    assert.ok(document.querySelector('.dccon-embedding-environment'));
+    assert.equal(document.querySelector('.dccon-options'), null);
     assert.match(document.querySelector('.dccon-diagnostics').textContent, /버그 제보/);
     assert.equal(document.querySelector('.dccon-tab-menu'), null);
     await click(document.querySelectorAll('.dccon-popover-toolbar button')[1]);

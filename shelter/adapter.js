@@ -2,12 +2,6 @@ function createAdapter(shelter, native, webpack) {
   const styles = new Map(), patches = new Set();
   const clone = value => value === undefined ? undefined : JSON.parse(JSON.stringify(value));
   const store = shelter.plugin.store;
-  const filesUpload = {addFiles(...args) {
-    const target = webpack.getModuleBySource(value => typeof value?.addFiles === 'function' &&
-      value.addFiles.toString().includes('UPLOAD_ATTACHMENT_ADD_FILES'), 'UPLOAD_ATTACHMENT_ADD_FILES');
-    if (!target) throw Error('Discord 파일 첨부 모듈을 찾지 못했습니다.');
-    return target.addFiles(...args);
-  }};
   const localeListeners = new Set();
   let localeObserver;
   const localeStore = {
@@ -78,16 +72,11 @@ function createAdapter(shelter, native, webpack) {
   const BdApi = {
     React: shelter.React, ReactDOM: shelter.ReactDOM,
     Webpack: {...webpack,
-      Filters: {...webpack.Filters, byKeys: (...keys) => value => {
-        if (keys.length === 1 && keys[0] === 'addFiles') return typeof value?.addFiles === 'function';
-        return webpack.Filters.byKeys(...keys)(value);
-      }},
       getModule(filter, options) {
         // Generic get/post/put/del exports also match low-level HTTP clients.
         // shelter captures Discord's API-aware client during initialization.
         const rest = shelter.http?._raw;
         if (rest && filter(rest)) return rest;
-        if (filter(filesUpload)) return filesUpload;
         if (filter.toString().includes('trackUploadFinished')) {
           return webpack.getModuleBySource(filter, 'trackUploadFinished');
         }
@@ -107,9 +96,9 @@ function createAdapter(shelter, native, webpack) {
       load: (_, key) => clone(store.dcconData?.[key]),
       save(_, key, value) {store.dcconData = {...clone(store.dcconData), [key]: clone(value)}; shelter.plugin.flushStore();},
     },
-    Net: {fetch: fetchNative}, Logger: {error: (...args) => console.error('[DCCon shelter]', ...args)},
+    Net: {fetch: fetchNative}, Logger: {error: (...args) => console.error('[discord-dccon shelter]', ...args)},
     Utils: {findInTree},
-    UI: {showToast: (content, options = {}) => shelter.ui.showToast({title: 'DCCon', content,
+    UI: {showToast: (content, options = {}) => shelter.ui.showToast({title: 'discord-dccon', content,
       duration: options.timeout || 4000,
       color: shelter.ui.ToastColors[options.type === 'error' ? 'CRITICAL' : options.type === 'success' ? 'SUCCESS' : 'INFO']})},
     DOM: {

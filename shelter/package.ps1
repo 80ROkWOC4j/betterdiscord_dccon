@@ -3,7 +3,7 @@ $ErrorActionPreference = 'Stop'
 $dist = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../artifacts/dist'))
 $checksums = [ordered]@{}
 foreach ($mode in @('betterdiscord', 'standalone')) {
-    $name = "dccon-$mode.zip"
+    $name = "discord-dccon-$mode.zip"
     $archive = Join-Path $dist $name
     Compress-Archive -Path (Join-Path $dist "$mode/*") -DestinationPath $archive -Force
     $checksums[$name] = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()

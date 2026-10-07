@@ -10,7 +10,7 @@ function runtime(initial = {}, fetch = undefined, globals = {}) {
     BdApi: {Logger: {error() {}}, Net: {fetch}, Data: {load: (_, key) => data[key], save: (_, key, value) => {data[key] = value;}},
       React: {Component: class {constructor(props) {this.props = props;} setState(value) {Object.assign(this.state, value);}}},
       Webpack: {getByKeys: () => ({}), getModule: () => ({}), Filters: {byKeys: () => () => true}}}};
-  vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../DCCon.plugin.js'), 'utf8') +
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../discord-dccon.plugin.js'), 'utf8') +
     '\nmodule.exports = {Embedding, DCConPanel, readEmbeddingVectors, setImageLoader: loader => {getDCConImage = loader;}};', context);
   return {...context.module.exports, data};
 }
@@ -276,4 +276,81 @@ test('an old index error cannot overwrite restarted status after checkpoint comp
   assert.equal(e.status.error, '');
   assert.equal(e.indexing, true);
   assert.equal(renames, 0);
+});
+
+function scheduledRuntime() {
+  const timers = new Map();
+  let sequence = 0;
+  const instance = runtime({}, undefined, {
+    navigator: {gpu: {}},
+    setTimeout(callback, delay) {assert.equal(delay, 500); timers.set(++sequence, callback); return sequence;},
+    clearTimeout(id) {timers.delete(id);},
+  });
+  return {...instance, timers, async fire() {
+    const callbacks = [...timers.values()]; timers.clear();
+    callbacks.forEach(callback => callback());
+    await new Promise(resolve => setImmediate(resolve));
+  }};
+}
+
+test('rapid embedding toggles start once for the final enabled state and off cancels immediately', async () => {
+  const {Embedding: e, timers, fire} = scheduledRuntime();
+  let starts = 0;
+  e.runStart = async () => {starts++;};
+  for (let i = 0; i < 30; i++) {e.toggle(true); e.toggle(false);}
+  assert.equal(timers.size, 0);
+  await fire(); assert.equal(starts, 0);
+  e.toggle(true); e.toggle(true);
+  assert.equal(timers.size, 1);
+  await fire(); assert.equal(starts, 1);
+  e.stop();
+});
+
+test('retry bursts coalesce and cannot start after embedding is disabled', async () => {
+  const {Embedding: e, timers, fire, data} = scheduledRuntime();
+  data.embeddingEnabled = true;
+  e.status.phase = '오류';
+  let starts = 0;
+  e.runStart = async () => {starts++;};
+  for (let i = 0; i < 30; i++) e.start();
+  assert.equal(timers.size, 1);
+  await fire(); assert.equal(starts, 1);
+  e.start(); e.toggle(false); e.start();
+  await fire(); assert.equal(starts, 1);
+  assert.equal(timers.size, 0);
+});
+
+test('retries cannot restart active initialization and old cleanup cannot unlock a new startup', async () => {
+  const {Embedding: e, timers, fire} = scheduledRuntime();
+  const pending = [];
+  e.directory = () => '/test';
+  e.files = () => ({mkdir: () => new Promise(resolve => pending.push(resolve)), readFile: async () => {throw Error('missing');}});
+  e.toggle(true); await fire();
+  assert.equal(e.starting, true);
+  const generation = e.generation;
+  for (let i = 0; i < 30; i++) e.start();
+  assert.equal(timers.size, 0);
+  assert.equal(e.generation, generation);
+  e.toggle(false); e.toggle(true); await fire();
+  assert.equal(pending.length, 2);
+  pending[0](); await new Promise(resolve => setImmediate(resolve));
+  assert.equal(e.starting, true);
+  e.toggle(false); pending[1]();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(e.starting, false);
+});
+
+test('failed startup releases its lock for a later retry; indexing ignores retries', async () => {
+  const {Embedding: e, timers, fire} = scheduledRuntime();
+  let attempts = 0;
+  e.directory = () => '/test';
+  e.files = () => ({mkdir: async () => {attempts++; throw Error('disk unavailable');}});
+  e.toggle(true); await fire();
+  assert.equal(e.status.phase, '오류');
+  assert.equal(e.starting, false);
+  e.start(); await fire();
+  assert.equal(attempts, 2);
+  e.indexing = true;
+  e.start(); assert.equal(timers.size, 0);
+  e.stop();
 });

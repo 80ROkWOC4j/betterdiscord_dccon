@@ -6,7 +6,7 @@ const path = require('node:path');
 const vm = require('node:vm');
 const {captureWebpack} = require('../shelter/webpack');
 const {createAdapter} = require('../shelter/adapter');
-const {createFiles, resolveFile, allowedDownload, hash, prepareDataRoot} = require('../shelter/native');
+const {createFiles, resolveFile, allowedDownload, hash, prepareDataRoot, channelOptions} = require('../shelter/native');
 
 test('shelter module capture survives webpack push replacement and observes reassigned exports', () => {
   const target = {}, api = captureWebpack(target);
@@ -48,8 +48,6 @@ test('upload lookup skips CSS and initializes only matching lazy factories', () 
   load(1);
   const shelter = {plugin: {store: {}, flushStore() {}}, flux: {storesFlat: {}}};
   const {BdApi} = createAdapter(shelter, {initialData: {}}, webpack);
-  const files = BdApi.Webpack.getModule(BdApi.Webpack.Filters.byKeys('addFiles'));
-  assert.deepEqual(files.addFiles({channelId: 'test'}), [{channelId: 'test'}]);
   const upload = BdApi.Webpack.getModule(value => typeof value === 'function' &&
     typeof value.prototype?.trackUploadFinished === 'function' && typeof value.prototype?.upload === 'function');
   assert.equal(typeof upload, 'function');
@@ -79,15 +77,15 @@ test('shelter storage returns independent snapshots and imports only once', () =
   const shelter = {plugin: {store, flushStore() {}}, flux: {storesFlat: {}}};
   const native = {initialData: {dccons: [{info: {title: 'original'}}]}};
   const {BdApi} = createAdapter(shelter, native, {});
-  const packs = BdApi.Data.load('DCCon', 'dccons');
+  const packs = BdApi.Data.load('discord-dccon', 'dccons');
   packs[0].info.title = 'changed';
-  assert.equal(BdApi.Data.load('DCCon', 'dccons')[0].info.title, 'original');
-  BdApi.Data.save('DCCon', 'dccons', packs);
+  assert.equal(BdApi.Data.load('discord-dccon', 'dccons')[0].info.title, 'original');
+  BdApi.Data.save('discord-dccon', 'dccons', packs);
   const second = createAdapter(shelter, {initialData: {}}, {});
-  assert.equal(second.BdApi.Data.load('DCCon', 'dccons')[0].info.title, 'changed');
+  assert.equal(second.BdApi.Data.load('discord-dccon', 'dccons')[0].info.title, 'changed');
 });
 
-test('link and image sends use shelter Discord REST, never an ambiguous HTTP export', async () => {
+test('image sends use shelter Discord REST, never an ambiguous HTTP export', async () => {
   const calls = [];
   const rest = {get() {}, put() {}, del() {}, async post(request) {
     assert.equal(this, rest);
@@ -108,18 +106,16 @@ test('link and image sends use shelter Discord REST, never an ambiguous HTTP exp
   const shelter = {http: {_raw: rest}, React: {Component: class {}}, plugin: {store: {}, flushStore() {}}, flux: {storesFlat: {}}};
   const adapter = createAdapter(shelter, {initialData: {}}, webpack);
   const module = {exports: {}};
-  const source = await fs.readFile(path.join(__dirname, '../DCCon.plugin.js'), 'utf8');
-  vm.runInNewContext(source + '\nmodule.exports={sendLinkDirectly,sendImagesDirectly};', {
+  const source = await fs.readFile(path.join(__dirname, '../discord-dccon.plugin.js'), 'utf8');
+  vm.runInNewContext(source + '\nmodule.exports={sendImagesDirectly};', {
     module, BdApi: adapter.BdApi, structuredClone, setTimeout, clearTimeout,
   });
-  const linkAttempt = {}, imageAttempt = {};
-  await module.exports.sendLinkDirectly({path: 'test-image'}, 'channel-test', linkAttempt);
+  const imageAttempt = {};
   await module.exports.sendImagesDirectly([{name: 'dccon.png', size: 3}], 'channel-test', imageAttempt);
-  assert.equal(calls.length, 2);
+  assert.equal(calls.length, 1);
   assert.equal(calls[0].url, '/channels/channel-test/messages');
-  assert.equal(calls[0].body.content, 'https://dccon-proxy.minibox.workers.dev/?no=test-image');
-  assert.equal(calls[1].body.attachments[0].uploaded_filename, 'uploaded-file');
-  assert.equal(linkAttempt.hasMessageId, true);
+  assert.equal(calls[0].body.content, '');
+  assert.equal(calls[0].body.attachments[0].uploaded_filename, 'uploaded-file');
   assert.equal(imageAttempt.hasMessageId, true);
 });
 
@@ -134,7 +130,7 @@ test('shelter patch adapter preserves this, arguments, results and unpatches', (
     },
   }};
   const adapter = createAdapter(shelter, {initialData: {}}, {});
-  adapter.BdApi.Patcher.after('DCCon', target, 'method', (self, args, result) => {
+  adapter.BdApi.Patcher.after('discord-dccon', target, 'method', (self, args, result) => {
     assert.equal(self, target); assert.deepEqual(args, [3]); assert.equal(result, 5);
   });
   assert.equal(target.method(3), 5);
@@ -160,36 +156,30 @@ test('adapter disposal aborts old downloads without reusing IDs after restart', 
   assert.equal(aborted.length, 1);
 });
 
-test('data directory migration preserves caches and recovery files without overwriting an existing directory', async t => {
-  const appData = await fs.mkdtemp(path.join(os.tmpdir(), 'dccon-path-test-'));
+test('channel data directories are separate and preserve existing files', async t => {
+  const appData = await fs.mkdtemp(path.join(os.tmpdir(), 'discord-dccon-path-test-'));
   t.after(() => fs.rm(appData, {recursive: true, force: true}));
-  const previous = path.join(appData, 'DCCon-shelter-poc');
-  await fs.mkdir(path.join(previous, 'DCCon-cache'), {recursive: true});
-  await fs.writeFile(path.join(previous, 'DCCon-cache/image'), 'cached');
-  await fs.writeFile(path.join(previous, 'installation.json'), 'recovery record');
-  const current = prepareDataRoot(appData);
-  assert.equal(current, path.join(appData, 'DCCon-shelter'));
-  assert.equal(await fs.readFile(path.join(current, 'DCCon-cache/image'), 'utf8'), 'cached');
-  assert.equal(await fs.readFile(path.join(current, 'installation.json'), 'utf8'), 'recovery record');
-  await assert.rejects(fs.access(previous));
-  await fs.mkdir(previous);
-  await fs.writeFile(path.join(previous, 'untouched'), 'older');
+  const current = prepareDataRoot(appData), canary = prepareDataRoot(appData, 'Canary');
+  assert.equal(current, path.join(appData, 'discord-dccon'));
+  assert.equal(canary, path.join(appData, 'discord-dccon-canary'));
+  await fs.writeFile(path.join(current, 'saved'), 'data');
   assert.equal(prepareDataRoot(appData), current);
-  assert.equal(await fs.readFile(path.join(previous, 'untouched'), 'utf8'), 'older');
+  assert.equal(await fs.readFile(path.join(current, 'saved'), 'utf8'), 'data');
+  await assert.rejects(fs.access(path.join(canary, 'saved')));
 });
 
 test('native bridge confines writes and reuses legacy binary cache read-only', async t => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'dccon-shelter-test-'));
   t.after(() => fs.rm(root, {recursive: true, force: true}));
   const current = path.join(root, 'current'), legacy = path.join(root, 'legacy');
-  await fs.mkdir(path.join(legacy, 'DCCon-cache'), {recursive: true});
+  await fs.mkdir(path.join(legacy, 'discord-dccon-cache'), {recursive: true});
   const bytes = Buffer.from([0, 255, 137, 80]);
-  await fs.writeFile(path.join(legacy, 'DCCon-cache', 'image'), bytes);
+  await fs.writeFile(path.join(legacy, 'discord-dccon-cache', 'image'), bytes);
   const file = createFiles(current, legacy);
-  assert.deepEqual(await file('readFile', ['/dccon/DCCon-cache/image', null]), bytes);
-  await file('mkdir', ['/dccon/DCCon-cache', {recursive: true}]);
-  await file('writeFile', ['/dccon/DCCon-cache/image', Buffer.from([1])]);
-  assert.deepEqual(await fs.readFile(path.join(legacy, 'DCCon-cache', 'image')), bytes);
+  assert.deepEqual(await file('readFile', ['/dccon/discord-dccon-cache/image', null]), bytes);
+  await file('mkdir', ['/dccon/discord-dccon-cache', {recursive: true}]);
+  await file('writeFile', ['/dccon/discord-dccon-cache/image', Buffer.from([1])]);
+  assert.deepEqual(await fs.readFile(path.join(legacy, 'discord-dccon-cache', 'image')), bytes);
   assert.throws(() => resolveFile(current, '/dccon/../../escape'));
   assert.throws(() => resolveFile(current, 'C:/escape'));
   assert.throws(() => allowedDownload('https://discord.com/api/v9/users/@me'));
@@ -199,7 +189,7 @@ test('native bridge confines writes and reuses legacy binary cache read-only', a
 });
 
 test('generated shelter bootstrap and DCCon source parse', async () => {
-  const source = await fs.readFile(path.join(__dirname, '../DCCon.plugin.js'), 'utf8');
+  const source = await fs.readFile(path.join(__dirname, '../discord-dccon.plugin.js'), 'utf8');
   assert.doesNotThrow(() => new vm.Script(source));
   const plugin = await fs.readFile(path.join(__dirname, '../shelter/plugin.js'), 'utf8');
   assert.doesNotThrow(() => new vm.Script(plugin));
@@ -218,7 +208,7 @@ test('plugin starts after first-store retry without PoC status APIs and cleans u
     dcconSource: 'module.exports=class {start(){this.patchChannelTextArea();} stop(){}}; const DCConButton=()=>{};',
     shelter: {React: {createElement() {}}, ReactDOM: {createPortal() {}}, ReactDOMClient: {createRoot() {}},
       http: {_raw: {get() {}, post() {}, put() {}, del() {}}},
-      plugin: {id: 'dccon-poc', flushStore() {
+      plugin: {id: 'discord-dccon', flushStore() {
         if (firstStore) {firstStore = false; throw Error('not a shelter storage proxy');}
       }},
       plugins: {stopPlugin: () => lifecycle.onUnload(), startPlugin() {lifecycle = vm.runInContext(source, context); lifecycle.onLoad();}},
@@ -234,7 +224,7 @@ test('plugin starts after first-store retry without PoC status APIs and cleans u
   assert.equal(context.DCConShelterStatus, undefined);
 });
 
-test('injector replaces Electron getter exports and installs preload on Discord windows', async () => {
+for (const channel of ['Stable', 'Canary']) test(`injector connects ${channel} and restricts IPC and CSP to its origin`, async () => {
   const events = new Map();
   let ready, onHeaders;
   const electron = {app: {getPath: () => os.tmpdir(), on: (_, fn) => {ready = fn;}}, ipcMain: {on: (key, fn) => events.set(key, fn), handle() {}},
@@ -242,11 +232,14 @@ test('injector replaces Electron getter exports and installs preload on Discord 
     BrowserWindow: class {constructor(options) {this.options = options; this.webContents = {id: 7, once() {}};}}, net: {}};
   const cachedModule = {};
   Object.defineProperty(cachedModule, 'exports', {configurable: true, get: () => electron});
-  const fakeFs = {readFileSync: () => '{}'};
+  const fakeFs = {readFileSync: file => file.endsWith('channel.json') ? JSON.stringify({channel}) : '{}'};
   function load(name) {
     if (name === 'electron') return electron;
     if (name === 'node:fs') return fakeFs;
-    if (name === './native') return {allowedDownload, prepareDataRoot: base => path.join(base, 'DCCon-shelter')};
+    if (name === './native') return {allowedDownload, channelOptions, prepareDataRoot: (base, selected) => {
+      assert.equal(selected, channel);
+      return path.join(base, channelOptions(selected).directory);
+    }};
     return require(name);
   }
   load.resolve = () => 'electron'; load.cache = {electron: cachedModule};
@@ -259,15 +252,44 @@ test('injector replaces Electron getter exports and installs preload on Discord 
   events.get('dccon:init')(event);
   assert.equal(event.returnValue.originalPreload, '/discord/preload.js');
   assert.equal(event.returnValue.initialData.embeddingEnabled, false);
+  const origin = channelOptions(channel).origin;
+  assert.equal(event.returnValue.origin, origin);
+  const frame = {url: origin + '/channels/@me'};
+  assert.doesNotThrow(() => events.get('dccon:abort')({senderFrame: frame, sender: {id: 7, mainFrame: frame}}, 1));
+  for (const url of ['https://canary.discord.com.evil.test', 'http://canary.discord.com', channelOptions(channel === 'Stable' ? 'Canary' : 'Stable').origin]) {
+    const otherFrame = {url};
+    assert.throws(() => events.get('dccon:abort')({senderFrame: otherFrame, sender: {mainFrame: otherFrame}}, 1), /Untrusted/);
+  }
   assert.equal(events.has('dccon:status'), false);
   ready();
   const responseHeaders = {'Content-Security-Policy': ["default-src 'self'; img-src 'self' https://*.discordapp.net; script-src 'self'; worker-src 'self'"]};
-  onHeaders({resourceType: 'mainFrame', url: 'https://discord.com/channels/@me', responseHeaders}, result => {
+  onHeaders({resourceType: 'mainFrame', url: origin + '/channels/@me', responseHeaders}, result => {
     const csp = result.responseHeaders['Content-Security-Policy'][0];
     assert.match(csp, /https:\/\/dccon-proxy\.minibox\.workers\.dev/);
     assert.match(csp, /https:\/\/\*\.discordapp\.net/);
     assert.match(csp, /default-src 'self'/);
   });
+  const untouched = {'Content-Security-Policy': ["default-src 'self'"]};
+  onHeaders({resourceType: 'mainFrame', url: 'https://example.com', responseHeaders: untouched}, result => {
+    assert.equal(result.responseHeaders['Content-Security-Policy'][0], "default-src 'self'");
+  });
+});
+
+test('preload injects only the configured channel main frame and always loads original preload', async () => {
+  const source = await fs.readFile(path.join(__dirname, '../shelter/preload.cjs'), 'utf8');
+  for (const channel of ['Stable', 'Canary']) for (const allowed of [true, false]) {
+    const origin = channelOptions(channel).origin, calls = [];
+    const electron = {ipcRenderer: {sendSync: () => ({origin, originalPreload: 'original', bundle: 'bundle'})},
+      contextBridge: {exposeInMainWorld: () => calls.push('bridge')},
+      webFrame: {executeJavaScript: () => {calls.push('injected'); return Promise.resolve();}}};
+    vm.runInNewContext(source, {process: {isMainFrame: true}, location: {origin: allowed ? origin : 'https://example.com'},
+      require(name) {
+        if (name === 'electron') return electron;
+        if (name === './native') return {createFiles() {}, hash() {}};
+        assert.equal(name, 'original'); calls.push('original');
+      }});
+    assert.deepEqual(calls, allowed ? ['bridge', 'injected', 'original'] : ['original']);
+  }
 });
 
 test('unchanged DCCon starts through shelter adapter, opens picker and cleans up', async () => {
@@ -300,10 +322,10 @@ test('unchanged DCCon starts through shelter adapter, opens picker and cleans up
   };
   const adapter = createAdapter(shelter, {initialData: {dccons: [], embeddingEnabled: false}}, webpack);
   const module = {exports: {}};
-  const source = await fs.readFile(path.join(__dirname, '../DCCon.plugin.js'), 'utf8');
+  const source = await fs.readFile(path.join(__dirname, '../discord-dccon.plugin.js'), 'utf8');
   vm.runInNewContext(source, {module, BdApi: adapter.BdApi, require: adapter.requireNative,
     window, document, structuredClone, setTimeout, clearTimeout});
-  const plugin = new module.exports({name: 'DCCon'});
+  const plugin = new module.exports({name: 'discord-dccon'});
   try {
     plugin.start();
     assert.equal(adapter.BdApi.Webpack.getByKeys('locale', 'initialize').locale, navigator.language);

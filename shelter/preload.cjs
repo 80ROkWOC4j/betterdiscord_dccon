@@ -1,7 +1,7 @@
 const {ipcRenderer, contextBridge, webFrame} = require('electron');
 const {createFiles, hash} = require('./native');
 const config = ipcRenderer.sendSync('dccon:init');
-if (config && process.isMainFrame && location.origin === 'https://discord.com') {
+if (config && process.isMainFrame && location.origin === config.origin) {
   contextBridge.exposeInMainWorld('DCConNative', {
     initialData: config.initialData,
     file: createFiles(config.dataRoot, config.legacyRoot),
@@ -11,7 +11,7 @@ if (config && process.isMainFrame && location.origin === 'https://discord.com') 
   });
   // Run before Discord's scripts: shelter observes React/Flux initialization.
   webFrame.executeJavaScript(config.bundle).catch(error => {
-    console.error('[DCCon shelter] bootstrap failed', error);
+    console.error('[discord-dccon shelter] bootstrap failed', error);
   });
 }
 if (config?.originalPreload) require(config.originalPreload);

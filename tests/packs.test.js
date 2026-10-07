@@ -23,14 +23,14 @@ async function scenario(file, initial, run) {
   const context = {module: {exports: {}}, structuredClone, setTimeout, clearTimeout, Blob, File, URL, BdApi: {
     React,
     // Deliberately return the SAME object, as a cached BetterDiscord store can.
-    Data: {load: (_, key) => data[key], save: (_, key, value) => { data[key] = value; }},
+    Data: {load: (name, key) => {assert.equal(name, 'discord-dccon'); return data[key];}, save: (name, key, value) => {assert.equal(name, 'discord-dccon'); data[key] = value;}},
     Net: {fetch: async () => { requests++; return {text: async () => JSON.stringify(pack(42)), arrayBuffer: async () => new Uint8Array([1, 2, 3]).buffer}; }},
     UI: {showToast() {}}, Logger: {error: (...args) => { throw Error(args.join(' ')); }},
     DOM: {addStyle() {}},
     Webpack: {getByKeys: () => ({locale: 'ko', addChangeListener() {}}), getStore: () => ({getUploads: () => nativeUploads}), getModule: () => ({addFiles: args => { uploads.push(args); nativeUploads.push({id: String(uploads.length), item: args.files[0]}); }}), Filters: {byKeys: () => () => true}},
   }};
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, '..', file), 'utf8') +
-    '\nmodule.exports = {DCConSettingsPanel, Plugin: module.exports, DCConPanel, DCConItem, BufferTray: typeof BufferTray === "undefined" ? null : BufferTray, sendDCConMessage, PackThumbnail: typeof PackThumbnail === "undefined" ? null : PackThumbnail, events: PluginEvents, setChannel: id => { currentChannelId = id; }};', context);
+    '\nmodule.exports = {DCConCategory, DCConSettingsPanel, Plugin: module.exports, DCConPanel, DCConItem, BufferTray: typeof BufferTray === "undefined" ? null : BufferTray, sendDCConMessage, PackThumbnail: typeof PackThumbnail === "undefined" ? null : PackThumbnail, events: PluginEvents, setChannel: id => { currentChannelId = id; }};', context);
   const {DCConSettingsPanel, Plugin} = context.module.exports;
   const root = createRoot(document.getElementById('root'));
   const ref = React.createRef();
@@ -61,7 +61,7 @@ async function searchResult(ref) {
 }
 
 test('one add and a rapid repeated remove keep storage and UI synchronized without changing tabs', async () => {
-  await scenario('DCCon.plugin.js', [], async ({data, ref, click, errors, requests}) => {
+  await scenario('discord-dccon.plugin.js', [], async ({data, ref, click, errors, requests}) => {
     await searchResult(ref);
     const add = document.querySelector('.dccon-card button');
     await React.act(async () => {
@@ -90,7 +90,7 @@ test('one add and a rapid repeated remove keep storage and UI synchronized witho
 });
 
 test('existing numeric/string duplicate IDs render once and removal preserves other packs', async () => {
-  await scenario('DCCon.plugin.js', [pack(42), pack('42'), pack(99, '다른 팩')], async ({data, click, errors}) => {
+  await scenario('discord-dccon.plugin.js', [pack(42), pack('42'), pack(99, '다른 팩')], async ({data, click, errors}) => {
     assert.equal(document.querySelectorAll('.dccon-card').length, 2);
     await click(document.querySelector('.dccon-card .dccon-item-error'));
     assert.equal(data.dccons.length, 1);
@@ -104,7 +104,7 @@ test('existing numeric/string duplicate IDs render once and removal preserves ot
 test('pack order controls persist order across remount and picker navigation', async () => {
   const initial = [pack(1, '첫째'), pack(2, '둘째'), pack(3, '셋째')];
   for (const item of initial) item.detail = [{idx: String(item.info.package_idx), title: '콘', path: 'image', ext: 'png'}];
-  await scenario('DCCon.plugin.js', initial, async ({data, root, DCConSettingsPanel, DCConPanel, click, errors}) => {
+  await scenario('discord-dccon.plugin.js', initial, async ({data, root, DCConSettingsPanel, DCConPanel, click, errors}) => {
     const titles = () => [...document.querySelectorAll('.dccon-card h3')].map(node => node.textContent);
     assert.equal(document.querySelector('[aria-label="첫째 위로"]').disabled, true);
     assert.equal(document.querySelector('[aria-label="셋째 아래로"]').disabled, true);
@@ -123,8 +123,8 @@ test('pack order controls persist order across remount and picker navigation', a
 });
 
 test('startup repairs stored duplicates once and retains the original data backup', async () => {
-  await scenario('DCCon.plugin.js', [pack(42), pack('42'), pack(99)], async ({data, Plugin}) => {
-    const plugin = new Plugin({name: 'DCCon'});
+  await scenario('discord-dccon.plugin.js', [pack(42), pack('42'), pack(99)], async ({data, Plugin}) => {
+    const plugin = new Plugin({name: 'discord-dccon'});
     plugin.patchChannelTextArea = () => {};
     plugin.start();
     assert.equal(data.dccons.length, 2);
@@ -139,7 +139,7 @@ test('startup repairs stored duplicates once and retains the original data backu
 test('favorite star persists, appears in favorites, and removes immediately without attaching', async () => {
   const saved = pack(42);
   saved.detail = [{idx: '7', title: '안녕', path: 'image-path', ext: 'png'}];
-  await scenario('DCCon.plugin.js', [saved], async ({root, DCConPanel, data, click, requests, errors}) => {
+  await scenario('discord-dccon.plugin.js', [saved], async ({root, DCConPanel, data, click, requests, errors}) => {
     await React.act(async () => root.render(React.createElement(DCConPanel, {type: 'dccon'})));
     await click(document.querySelector('.dccon-favorite'));
     assert.equal(data.favorites.length, 1);
@@ -155,30 +155,9 @@ test('favorite star persists, appears in favorites, and removes immediately with
   });
 });
 
-test('attachment-only clicks preserve picker and recent history stays unique', async () => {
-  await scenario('DCCon.plugin.js', [], async ({root, DCConItem, events, setChannel, uploads, data, errors}) => {
-    setChannel('channel-test');
-    data.attachOnly = true;
-    let closes = 0;
-    events.subscribe('DCCON_CLOSE', () => closes++);
-    await React.act(async () => root.render(React.createElement(DCConItem, {
-      con: {idx: '7', title: '안녕', path: 'image-path', ext: 'gif'}, packageIdx: 42,
-    })));
-    await React.act(async () => document.querySelector('.dccon-item').dispatchEvent(new window.MouseEvent('click', {bubbles: true, shiftKey: true})));
-    assert.equal(uploads.length, 1);
-    assert.equal(uploads[0].channelId, 'channel-test');
-    assert.equal(uploads[0].files[0].file.type, 'image/gif');
-    assert.equal(closes, 0);
-    await React.act(async () => document.querySelector('.dccon-item').dispatchEvent(new window.MouseEvent('click', {bubbles: true})));
-    assert.equal(uploads.length, 2);
-    assert.equal(closes, 0);
-    assert.equal(data.recent.length, 1);
-    assert.deepEqual(errors, []);
-  });
-});
 
 test('thumbnail uses cover and falls back from a 1px image, then to a label on errors', async () => {
-  await scenario('DCCon.plugin.js', [], async ({root, PackThumbnail, errors}) => {
+  await scenario('discord-dccon.plugin.js', [], async ({root, PackThumbnail, errors}) => {
     const saved = pack(42);
     saved.info.main_img_path = 'cover';
     saved.info.list_img_path = 'list';
@@ -199,7 +178,7 @@ test('thumbnail uses cover and falls back from a 1px image, then to a label on e
 });
 
 test('diagnostic tab displays a copyable report without uploading or modifying saved data', async () => {
-  await scenario('DCCon.plugin.js', [pack(42)], async ({data, click, requests, uploads, errors, root, DCConSettingsPanel}) => {
+  await scenario('discord-dccon.plugin.js', [pack(42)], async ({data, click, requests, uploads, errors, root, DCConSettingsPanel}) => {
     const before = JSON.stringify(data);
     await React.act(async () => root.render(React.createElement(DCConSettingsPanel, {section: 'settings'})));
     await click(document.querySelector('.dccon-diagnostics button'));
@@ -218,22 +197,19 @@ test('diagnostic tab displays a copyable report without uploading or modifying s
   });
 });
 
-test('send mode selector persists all three modes without sending', async () => {
-  await scenario('DCCon.plugin.js', [], async ({data, click, requests, uploads, root, DCConSettingsPanel}) => {
+test('settings no longer offer removed send modes', async () => {
+  await scenario('discord-dccon.plugin.js', [], async ({requests, uploads, root, DCConSettingsPanel}) => {
     await React.act(async () => root.render(React.createElement(DCConSettingsPanel, {section: 'settings'})));
-    assert.equal(document.querySelector('input[type=radio]:checked').value, 'link');
-    for (const mode of ['attach', 'image', 'link']) {
-      await click(document.querySelector('input[value=' + mode + ']'));
-      assert.equal(document.querySelector('input[type=radio]:checked').value, mode);
-      assert.equal(data.sendMode, mode);
-    }
+    assert.equal(document.querySelector('input[name="dccon-send-mode"]'), null);
+    assert.equal(document.querySelector('.dccon-mode-choice'), null);
+    assert.ok(document.querySelector('.dccon-diagnostics'));
     assert.equal(requests(), 0);
     assert.equal(uploads.length, 0);
   });
 });
 
 test('private buffer tray shows local thumbnails, survives remount, and supports remove and clear', async () => {
-  await scenario('DCCon.plugin.js', [], async ({root, BufferTray, sendDCConMessage, setChannel, click, uploads, errors, data}) => {
+  await scenario('discord-dccon.plugin.js', [], async ({root, BufferTray, sendDCConMessage, setChannel, click, uploads, errors, data}) => {
     data.sendMode = 'image';
     setChannel('buffer-ui');
     const con = {idx: '1', title: '안녕', path: 'test', ext: 'png'};
@@ -249,6 +225,33 @@ test('private buffer tray shows local thumbnails, survives remount, and supports
     assert.match(document.querySelector('[role="status"]').textContent, /1\/9/);
     await click(document.querySelector('.dccon-buffer-heading button'));
     assert.equal(document.querySelector('.dccon-buffer'), null);
+    assert.deepEqual(errors, []);
+  });
+});
+
+test('pack collapse persists independently across remounts and pack reordering', async () => {
+  await scenario('discord-dccon.plugin.js', [], async ({root, DCConCategory, click, data, errors}) => {
+    const first = pack(42, '첫 번째'), second = pack(43, '두 번째');
+    const render = async packs => React.act(async () => root.render(React.createElement(React.Fragment, null,
+      ...packs.map(dccon => React.createElement(DCConCategory, {key: dccon.info.package_idx, dccon})))));
+    const headers = () => [...document.querySelectorAll('.dccon-category-header')];
+    await render([first, second]);
+    assert.deepEqual(headers().map(e => e.getAttribute('aria-expanded')), ['true', 'true']);
+    await click(headers()[0]);
+    await click(headers()[1]);
+    assert.deepEqual(data.collapsedPacks, {'42': true, '43': true});
+    await click(headers()[1]);
+    assert.deepEqual(data.collapsedPacks, {'42': true});
+    await React.act(async () => root.render(null));
+    // A fresh component reads saved data, with string IDs and a different order.
+    await render([second, {...first, info: {...first.info, package_idx: '42'}}]);
+    assert.deepEqual(headers().map(e => e.getAttribute('aria-expanded')), ['true', 'false']);
+    assert.equal(document.querySelectorAll('.dccon-items').length, 1);
+    await click(headers()[1]);
+    await React.act(async () => root.render(null));
+    await render([first, second]);
+    assert.deepEqual(headers().map(e => e.getAttribute('aria-expanded')), ['true', 'true']);
+    assert.deepEqual(data.collapsedPacks, {});
     assert.deepEqual(errors, []);
   });
 });

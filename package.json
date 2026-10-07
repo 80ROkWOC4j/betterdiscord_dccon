@@ -1,5 +1,5 @@
 {
-  "name": "betterdiscord-dccon",
+  "name": "discord-dccon",
   "private": true,
   "scripts": {
     "build:packages": "node shelter/build.cjs",
@@ -12,7 +12,7 @@
     "react-dom": "19.3.0"
   },
   "version": "3.0.0",
-  "description": "BetterDiscord 디시콘 플러그인 — DCCon2 기반 비공식 파생 버전",
+  "description": "Discord 디시콘 확장 — DCCon2 기반 비공식 파생 버전",
   "author": "80ROkWOC4j",
   "contributors": [
     {
@@ -21,12 +21,12 @@
     }
   ],
   "license": "GPL-3.0-only",
-  "homepage": "https://github.com/80ROkWOC4j/betterdiscord_dccon",
+  "homepage": "https://github.com/80ROkWOC4j/discord-dccon",
   "repository": {
     "type": "git",
-    "url": "https://github.com/80ROkWOC4j/betterdiscord_dccon.git"
+    "url": "https://github.com/80ROkWOC4j/discord-dccon.git"
   },
   "bugs": {
-    "url": "https://github.com/80ROkWOC4j/betterdiscord_dccon/issues"
+    "url": "https://github.com/80ROkWOC4j/discord-dccon/issues"
   }
 }
