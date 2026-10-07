@@ -4,14 +4,14 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 const path = require('node:path');
 
-function runtime(initial = {}, fetch = undefined) {
+function runtime(initial = {}, fetch = undefined, globals = {}) {
   const data = {...initial};
-  const context = {module: {exports: {}}, structuredClone, setTimeout, clearTimeout, URL,
-    BdApi: {Net: {fetch}, Data: {load: (_, key) => data[key], save: (_, key, value) => {data[key] = value;}},
+  const context = {module: {exports: {}}, structuredClone, setTimeout, clearTimeout, URL, AbortController, ArrayBuffer, ...globals,
+    BdApi: {Logger: {error() {}}, Net: {fetch}, Data: {load: (_, key) => data[key], save: (_, key, value) => {data[key] = value;}},
       React: {Component: class {constructor(props) {this.props = props;} setState(value) {Object.assign(this.state, value);}}},
       Webpack: {getByKeys: () => ({}), getModule: () => ({}), Filters: {byKeys: () => () => true}}}};
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../DCCon.plugin.js'), 'utf8') +
-    '\nmodule.exports = {Embedding, DCConPanel};', context);
+    '\nmodule.exports = {Embedding, DCConPanel, readEmbeddingVectors, setImageLoader: loader => {getDCConImage = loader;}};', context);
   return {...context.module.exports, data};
 }
 
@@ -68,6 +68,41 @@ test('pack changes during indexing schedule a follow-up pass', async () => {
   assert.equal(e.reindex, true);
 });
 
+for (const action of ['clear', 'unmount', 'replace']) {
+  test(`search ${action} cancels queued inference before it reaches the worker`, async () => {
+    let timer, finish;
+    const {Embedding: e, DCConPanel} = runtime({embeddingEnabled: true}, undefined, {
+      setTimeout: callback => {timer = callback; return 1;}, clearTimeout: () => {timer = null;},
+    });
+    const calls = [];
+    e.ready = true;
+    e.call = async (_, args) => {
+      calls.push(args.text);
+      if (args.text === 'first') await new Promise(resolve => {finish = resolve;});
+      return [1, 0];
+    };
+    const first = assert.rejects(e.search('first'), /취소/);
+    await new Promise(resolve => setImmediate(resolve));
+    const panel = new DCConPanel({type: 'dccon'});
+    panel.componentDidMount();
+    panel.changeSearch('obsolete');
+    const pending = timer();
+    if (action === 'clear') panel.clearSearch();
+    else if (action === 'unmount') panel.componentWillUnmount();
+    else panel.changeSearch('latest');
+    finish();
+    await Promise.all([first, pending]);
+    assert.deepEqual(calls, ['first']);
+    assert.equal(panel.state.searchError, '');
+    if (action === 'replace') {
+      await timer();
+      assert.deepEqual(calls, ['first', 'latest']);
+      assert.equal(panel.state.searching, false);
+    }
+    if (action !== 'unmount') panel.componentWillUnmount();
+  });
+}
+
 test('model download resolves relative redirects without BetterDiscord automatic handling', async () => {
   const requests = [];
   const response = {status: 200};
@@ -90,4 +125,155 @@ test('model download stops redirect loops and cancelled requests', async () => {
   e.generation++;
   await assert.rejects(e.download('https://example.com/model', 0), /중단/);
   assert.equal(count, 9);
+});
+
+test('model asset requests coalesce and clear failed requests for retry', async () => {
+  const {Embedding: e} = runtime();let finish,count=0;
+  e.readAsset=()=>{count++;return new Promise(resolve=>{finish=resolve;});};
+  const one=e.asset('model',0),two=e.asset('model',0);assert.equal(count,1);
+  finish(new ArrayBuffer(4));assert.equal(await one,await two);assert.equal(e.assetRequests.size,0);
+  e.readAsset=async()=>{throw Error('network');};
+  await assert.rejects(e.asset('model',0),/network/);assert.equal(e.assetRequests.size,0);
+});
+
+test('stopping embedding aborts in-flight download and releases vectors', async () => {
+  let signal;const {Embedding: e}=runtime({},async(_,options)=>{signal=options.signal;return new Promise((_,reject)=>signal.addEventListener('abort',()=>reject(Error('aborted'))));});
+  e.vectors={'test:png':[1]};const request=e.download('https://example.com/model',0);
+  const rejected=assert.rejects(request,/aborted/);e.stop();await rejected;
+  assert.equal(signal.aborted,true);assert.equal(e.downloads.size,0);assert.equal(Object.keys(e.vectors).length,0);
+});
+
+test('latest semantic query replaces waiting queries without extra model inference', async () => {
+  const {Embedding: e}=runtime();e.ready=true;const calls=[];let finish;
+  e.call=async(_,args)=>{calls.push(args.text);if(args.text==='first')await new Promise(resolve=>{finish=resolve;});return [1,0];};
+  const one=e.search('first');const firstRejected=assert.rejects(one,/취소/);
+  await new Promise(resolve=>setImmediate(resolve));
+  const two=e.search('obsolete');const secondRejected=assert.rejects(two,/취소/);
+  const three=e.search('latest');finish();await Promise.all([firstRejected,secondRejected,three]);
+  assert.deepEqual(calls,['first','latest']);
+});
+
+test('worker RPC transfers buffers and cleans up synchronous post failure', async () => {
+  const {Embedding: e}=runtime();let sent;
+  const bytes=new ArrayBuffer(16);e.worker={postMessage:(message,transfer)=>{sent={message,transfer};}};
+  const task=e.call('image',{bytes});assert.equal(sent.transfer[0],bytes);
+  e.pending.get(sent.message.id).resolve('ok');e.pending.delete(sent.message.id);assert.equal(await task,'ok');
+  e.worker={postMessage:()=>{throw Error('clone failed');}};
+  await assert.rejects(e.call('image',{bytes}),/clone failed/);assert.equal(e.pending.size,0);
+});
+
+test('legacy cache keeps static vectors, rebuilds GIFs, and rejects damaged vectors', () => {
+  const {readEmbeddingVectors: read}=runtime();const vector=Array(768).fill(0);vector[0]=1;
+  const saved={spec:'q8-560-gif3-browser-v1',vectors:{'ok:png':vector,'old:gif':vector,'zero:png':Array(768).fill(0),'short:png':[1]}};
+  assert.deepEqual(Object.keys(read(saved)),['ok:png']);saved.spec='q8-image560-video6x280-v2';assert.deepEqual(Object.keys(read(saved)),['ok:png','old:gif']);
+});
+
+test('cached index does not rewrite unchanged vector file', async () => {
+  const {Embedding: e}=runtime({dccons:[{info:{package_idx:1},detail:[{path:'a',ext:'png'}]}]},undefined,{require});
+  let writes=0;e.ready=true;e.vectors={'a:png':[1]};e.directory=()=>'/test';e.files=()=>({writeFile:async()=>{writes++;},rename:async()=>{}});
+  await e.index();assert.equal(writes,0);assert.equal(e.status.phase,'준비 완료');
+});
+
+for (const failure of ['write', 'rename']) {
+  test(`index retries unsaved vectors after ${failure} failure without repeating inference`, async () => {
+    const {Embedding: e, setImageLoader} = runtime({dccons: [{info: {package_idx: 1},
+      detail: [{path: 'a', ext: 'png'}]}]}, undefined, {require});
+    let failing = true, calls = 0, writes = 0, temporary, saved;
+    e.ready = true;
+    e.directory = () => '/test';
+    e.files = () => ({
+      writeFile: async (_, text) => {
+        writes++;
+        if (failing && failure === 'write') throw Error('disk unavailable');
+        temporary = JSON.parse(text);
+      },
+      rename: async () => {
+        if (failing && failure === 'rename') throw Error('file locked');
+        saved = temporary;
+      },
+    });
+    setImageLoader(async () => ({arrayBuffer: async () => new ArrayBuffer(1)}));
+    e.call = async () => {calls++; return [1];};
+    await e.index();
+    assert.equal(e.status.phase, '오류');
+    assert.equal(saved, undefined);
+    assert.equal(e.dirtyVectors, 1);
+    failing = false;
+    await e.index();
+    assert.deepEqual(saved.vectors['a:png'], [1]);
+    assert.equal(e.status.phase, '준비 완료');
+    assert.equal(e.dirtyVectors, 0);
+    assert.equal(calls, 1);
+    const successfulWrites = writes;
+    await e.index();
+    assert.equal(writes, successfulWrites);
+  });
+}
+
+test('old checkpoint completion cannot clear a restarted index dirty state', async () => {
+  const {Embedding: e, setImageLoader} = runtime({dccons: [{info: {package_idx: 1},
+    detail: [{path: 'a', ext: 'png'}]}]}, undefined, {require});
+  let finish;
+  e.ready = true;
+  e.directory = () => '/test';
+  e.files = () => ({writeFile: async () => {}, rename: () => new Promise(resolve => {finish = resolve;})});
+  setImageLoader(async () => ({arrayBuffer: async () => new ArrayBuffer(1)}));
+  e.call = async () => [1];
+  const indexing = e.index();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(typeof finish, 'function');
+  e.stop();
+  assert.equal(e.dirtyVectors, 0);
+  e.dirtyVectors = 2;
+  e.update({phase: '준비 중'});
+  finish();
+  await indexing;
+  assert.equal(e.dirtyVectors, 2);
+  assert.equal(e.status.phase, '준비 중');
+});
+
+test('index cancelled during file read cannot enqueue into a restarted worker', async () => {
+  const {Embedding: e, setImageLoader} = runtime({dccons: [{info: {package_idx: 1}, detail: [{path: 'a', ext: 'png'}]}]});
+  let finish, calls = 0;
+  e.ready = true;
+  setImageLoader(async () => ({arrayBuffer: () => new Promise(resolve => {finish = resolve;})}));
+  e.call = async () => {calls++; return [1];};
+  const indexing = e.index();
+  await new Promise(resolve => setImmediate(resolve));
+  e.stop(); e.ready = true;
+  finish(new ArrayBuffer(1));
+  await indexing;
+  assert.equal(calls, 0);
+  assert.equal(Object.keys(e.vectors).length, 0);
+});
+
+test('index saves completed work before stopping after three errors', async () => {
+  const {Embedding: e,setImageLoader}=runtime({dccons:[{info:{package_idx:1},detail:['a','b','c','d'].map(path=>({path,ext:'jpg'}))}]},undefined,{require});
+  let calls=0,saved,type;e.ready=true;e.directory=()=>'/test';e.files=()=>({writeFile:async(_,text)=>{saved=JSON.parse(text);},rename:async()=>{}});
+  setImageLoader(async()=>({arrayBuffer:async()=>new ArrayBuffer(1)}));
+  e.call=async(_,args)=>{type=args.type;if(calls++>0)throw Error('decode failed');return [1];};
+  await e.index();assert.equal(type,'image/jpeg');assert.equal(e.status.phase,'오류');assert.ok(saved.vectors['a:jpg']);assert.equal(e.indexing,false);
+});
+
+test('an old index error cannot overwrite restarted status after checkpoint completes', async () => {
+  const {Embedding: e, setImageLoader} = runtime({dccons: [{info: {package_idx: 1},
+    detail: ['a', 'b', 'c', 'd'].map(path => ({path, ext: 'png'}))}]}, undefined, {require});
+  let finish, calls = 0, renames = 0;
+  e.ready = true;
+  e.directory = () => '/test';
+  e.files = () => ({writeFile: () => new Promise(resolve => {finish = resolve;}), rename: async () => {renames++;}});
+  setImageLoader(async () => ({arrayBuffer: async () => new ArrayBuffer(1)}));
+  e.call = async () => {if (calls++) throw Error('old failure'); return [1];};
+  const indexing = e.index();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(typeof finish, 'function');
+  e.stop();
+  e.update({phase: '준비 중', error: ''});
+  e.indexing = true;
+  finish();
+  await indexing;
+  assert.equal(e.status.phase, '준비 중');
+  assert.equal(e.status.error, '');
+  assert.equal(e.indexing, true);
+  assert.equal(renames, 0);
 });

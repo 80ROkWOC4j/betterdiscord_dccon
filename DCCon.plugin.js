@@ -1,7 +1,7 @@
 /**
  * @name DCCon
  * @description 디스코드에서 디시콘을 쉽게 사용할 수 있게 도와주는 플러그인입니다.
- * @version 2.6.0
+ * @version 3.0.0
  * @author 80ROkWOC4j
  * @website https://github.com/80ROkWOC4j/betterdiscord_dccon
  * @source https://github.com/80ROkWOC4j/betterdiscord_dccon
@@ -10,7 +10,7 @@
 
 // Derived from DCCon2 by minibox (Discord author ID: 310247242546151434).
 // Original repository: https://github.com/minibox24/DCCon2 (no longer available).
-// Modified version maintained by 80ROkWOC4j; modified on 2026-10-07.
+// Modified version maintained by 80ROkWOC4j; modified on 2026-10-08.
 // Distributed under GNU GPL version 3; see LICENSE. Original attribution retained.
 // Reference: https://github.com/Dastan21/BDAddons/blob/main/plugins/FavoriteMedia/FavoriteMedia.plugin.js
 
@@ -314,7 +314,7 @@ async function getDCConImage(con) {
         // BetterDiscord defaults to UTF-8, unlike Node. Never construct an image from text.
         if (typeof cached === "string") throw Object.assign(new Error("Cache returned text"), {code: "CACHE_NOT_BINARY"});
         if (cached.length) {
-          return new File([cached], `dccon.${con.ext}`, { type: `image/${con.ext}` });
+          return new File([cached], `dccon.${con.ext}`, { type: con.ext === "jpg" ? "image/jpeg" : `image/${con.ext}` });
         }
       }
     } catch { /* Missing or unreadable cache: fetch the original. */ }
@@ -335,7 +335,7 @@ async function getDCConImage(con) {
         BdApi.Logger.error("DCCon", "Image cache write failed", error);
       }
     }
-    return new File([bytes], `dccon.${con.ext}`, { type: `image/${con.ext}` });
+    return new File([bytes], `dccon.${con.ext}`, { type: con.ext === "jpg" ? "image/jpeg" : `image/${con.ext}` });
   })();
   imageRequests.set(key, request);
   try { return await request; } finally { imageRequests.delete(key); }
@@ -784,11 +784,13 @@ class DCConPanel extends BdApi.React.Component {
     PluginEvents.unsubscribe("DCCON_FAVORITES_UPDATE", this.refresh);
     PluginEvents.unsubscribe("DCCON_RECENT_UPDATE", this.refresh);
     this.mounted = false; clearTimeout(this.searchTimer); this.searchGeneration = (this.searchGeneration || 0) + 1;
+    Embedding.cancelSearch();
     PluginEvents.unsubscribe("DCCON_EMBEDDING_UPDATE", this.embeddingRefresh);
   }
 
   changeSearch(text) {
     clearTimeout(this.searchTimer);
+    Embedding.cancelSearch();
     const generation = this.searchGeneration = (this.searchGeneration || 0) + 1;
     const semantic = Embedding.enabled() && text.trim();
     this.setState({textFilter: text, semanticResults: [], searchError: "", searching: Boolean(semantic)});
@@ -1116,6 +1118,14 @@ function inspectInstantSend() {
   return report;
 }
 
+const EMBEDDING_SPEC = "q8-image560-video6x280-v2";
+function readEmbeddingVectors(saved) {
+  if (!["q8-560-gif3-browser-v1", EMBEDDING_SPEC].includes(saved?.spec) || !saved.vectors) return {};
+  return Object.fromEntries(Object.entries(saved.vectors).filter(([key, vector]) =>
+    (saved.spec === EMBEDDING_SPEC || !key.endsWith(":gif")) && Array.isArray(vector) &&
+    vector.length === 768 && vector.every(Number.isFinite) && Math.abs(Math.hypot(...vector) - 1) < 0.001));
+}
+
 // Runs in a browser Worker: no Node, native addons, or local PoC server required.
 async function embeddingWorker() {
   let model, processor, RawImage, RawVideo, RawVideoFrame, requestId = 0, work = Promise.resolve();
@@ -1222,7 +1232,8 @@ async function embeddingWorker() {
 }
 
 const Embedding = {
-  worker: null, generation: 0, sequence: 0, pending: new Map(), vectors: {}, urls: [],
+  worker: null, generation: 0, sequence: 0, pending: new Map(), vectors: {}, dirtyVectors: 0, urls: [],
+  assetRequests: new Map(), downloads: new Set(), searchSequence: 0, searchWork: Promise.resolve(),
   status: {phase: "꺼짐", completed: 0, total: 0, errors: 0},
   enabled() {return loadData("embeddingEnabled", false) === true;},
   key(con) {return con.path + ":" + con.ext;},
@@ -1241,7 +1252,11 @@ const Embedding = {
     // BetterDiscord's automatic redirect handler cannot resolve relative Location headers.
     for (let redirects = 0; redirects <= 8; redirects++) {
       if (generation !== this.generation) throw Error("임베딩 중단됨");
-      const response = await BdApi.Net.fetch(url, {responseType: "arraybuffer", redirect: "manual"});
+      const controller = new AbortController();
+      this.downloads.add(controller);
+      let response;
+      try {response = await BdApi.Net.fetch(url, {responseType: "arraybuffer", redirect: "manual", signal: controller.signal});}
+      finally {this.downloads.delete(controller);}
       if (![301, 302, 303, 307, 308].includes(response.status)) return response;
       const location = response.headers?.get?.("location");
       if (!location) throw Error("모델 다운로드 리다이렉트 주소가 없습니다.");
@@ -1252,6 +1267,13 @@ const Embedding = {
     throw Error("모델 다운로드 리다이렉트 횟수를 초과했습니다.");
   },
   async asset(url, generation, expectedHash) {
+    const key = `${generation}:${url}`;
+    if (this.assetRequests.has(key)) return this.assetRequests.get(key);
+    const request = this.readAsset(url, generation, expectedHash);
+    this.assetRequests.set(key, request);
+    try {return await request;} finally {this.assetRequests.delete(key);}
+  },
+  async readAsset(url, generation, expectedHash) {
     const fs = this.files(), hash = bytes => require("crypto").createHash("sha256").update(bytes).digest("hex");
     const file = require("path").join(this.directory(), hash(url));
     let bytes;
@@ -1274,11 +1296,18 @@ const Embedding = {
     if (!worker) return Promise.reject(Error("임베딩 모델이 준비되지 않았습니다."));
     return new Promise((resolve, reject) => {
       const id = ++this.sequence; this.pending.set(id, {resolve, reject});
-      worker.postMessage({id, action, ...args});
+      try {
+        const transfer = [args.bytes, args.wasm].filter(value => value instanceof ArrayBuffer);
+        worker.postMessage({id, action, ...args}, transfer);
+      } catch (error) {this.pending.delete(id); reject(error);}
     });
   },
   stop() {
-    this.generation++;
+    this.generation++; this.searchSequence++;
+    for (const controller of this.downloads) controller.abort();
+    this.downloads.clear();
+    this.vectors = {};
+    this.dirtyVectors = 0;
     this.worker?.terminate(); this.worker = null;
     for (const task of this.pending.values()) task.reject(Error("임베딩 중단됨"));
     this.pending.clear(); this.urls.forEach(url => URL.revokeObjectURL(url)); this.urls = [];
@@ -1296,12 +1325,12 @@ const Embedding = {
     try {
       if (!globalThis.navigator?.gpu) throw Error("현재 Discord에서 WebGPU를 사용할 수 없습니다.");
       await this.files().mkdir(this.directory(), {recursive: true});
+      if (generation !== this.generation) return;
       this.vectors = {};
       try {
         const saved = JSON.parse(await this.files().readFile(require("path").join(this.directory(), "vectors-v1.json"), "utf8"));
         if (generation !== this.generation) return;
-        if (["q8-560-gif3-browser-v1", "q8-image560-video6x280-v2"].includes(saved.spec) && saved.vectors) this.vectors = Object.fromEntries(
-          Object.entries(saved.vectors).filter(([key, vector]) => (saved.spec === "q8-image560-video6x280-v2" || !key.endsWith(":gif")) && Array.isArray(vector) && vector.length === 768 && vector.every(Number.isFinite)));
+        this.vectors = readEmbeddingVectors(saved);
       } catch { /* First index or interrupted write: rebuild missing entries. */ }
       const runtime = "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.31.0-dev.20260914-8d85527a0/dist/";
       const library = await this.asset("https://cdn.jsdelivr.net/npm/@huggingface/transformers@4.3.1/dist/transformers.min.js", generation,
@@ -1318,7 +1347,9 @@ const Embedding = {
         if (data.download) {
           try {
             if (!data.url.startsWith("https://huggingface.co/onnx-community/embeddinggemma-2-ONNX/resolve/daa72c51243991dfcaf9f9137d2c573d8f7790c0/")) throw Error("예상하지 못한 모델 URL");
-            const bytes = await this.asset(data.url, generation);
+            const cachedBytes = await this.asset(data.url, generation);
+            // A shared download may have multiple consumers; transfer a separate buffer to each.
+            const bytes = cachedBytes.slice(0);
             if (generation === this.generation) worker.postMessage({download: data.download, bytes}, [bytes]);
           } catch (error) {if (generation === this.generation) worker.postMessage({download: data.download, error: String(error.message)});}
         } else {
@@ -1347,11 +1378,16 @@ const Embedding = {
     this.indexing = true;
     const generation = this.generation;
     const items = [...new Map(loadPacks().flatMap(pack => pack.detail).map(con => [this.key(con), con])).values()];
-    this.update({phase: "이미지 색인", total: items.length, completed: 0, errors: 0, file: ""});
+    const active = new Set(items.map(con => this.key(con)));
+    for (const key of Object.keys(this.vectors)) if (!active.has(key)) {delete this.vectors[key]; this.dirtyVectors++;}
+    this.update({phase: "이미지 색인", total: items.length, completed: 0, errors: 0, error: "", file: ""});
     const checkpoint = async () => {
+      if (!this.dirtyVectors || generation !== this.generation) return;
       const file = require("path").join(this.directory(), "vectors-v1.json"), fs = this.files();
-      await fs.writeFile(file + ".tmp-" + generation, JSON.stringify({spec: "q8-image560-video6x280-v2", vectors: this.vectors}));
-      if (generation === this.generation) await fs.rename(file + ".tmp-" + generation, file);
+      await fs.writeFile(file + ".tmp-" + generation, JSON.stringify({spec: EMBEDDING_SPEC, vectors: this.vectors}));
+      if (generation !== this.generation) return;
+      await fs.rename(file + ".tmp-" + generation, file);
+      if (generation === this.generation) this.dirtyVectors = 0;
     };
     try {
       for (const [i, con] of items.entries()) {
@@ -1361,9 +1397,11 @@ const Embedding = {
           if (!this.vectors[key]) {
             const file = await getDCConImage(con);
             if (generation !== this.generation) return;
-            const vector = await this.call("image", {bytes: await file.arrayBuffer(), type: con.ext === "gif" ? "image/gif" : "image/png"});
+            const bytes = await file.arrayBuffer();
             if (generation !== this.generation) return;
-            this.vectors[key] = vector;
+            const vector = await this.call("image", {bytes, type: con.ext === "jpg" ? "image/jpeg" : `image/${con.ext}`});
+            if (generation !== this.generation) return;
+            this.vectors[key] = vector; this.dirtyVectors++;
           }
         } catch (error) {
           if (generation !== this.generation) return;
@@ -1372,11 +1410,17 @@ const Embedding = {
           if (this.status.errors >= 3) throw error;
         }
         this.update({completed: i + 1});
-        if ((i + 1) % 10 === 0) await checkpoint();
+        if (this.dirtyVectors >= 10) await checkpoint();
       }
       await checkpoint();
       if (generation === this.generation) this.update({phase: this.status.errors ? "완료 · 일부 실패" : "준비 완료"});
-    } catch (error) {if (generation === this.generation) this.update({phase: "오류", error: String(error.message)});}
+    } catch (error) {
+      if (generation === this.generation) {
+        try {await checkpoint();} catch (saveError) {BdApi.Logger.error("DCCon", "Embedding checkpoint failed", saveError);}
+        if (generation !== this.generation) return;
+        this.update({phase: "오류", error: String(error.message)});
+      }
+    }
     finally {
       if (generation === this.generation) {
         this.indexing = false;
@@ -1384,9 +1428,17 @@ const Embedding = {
       }
     }
   },
+  cancelSearch() {this.searchSequence++;},
   async search(text) {
     if (!this.ready) throw Error(this.status.error || "모델 준비 중입니다. 설정에서 진행 상태를 확인하세요.");
-    const vector = await this.call("query", {text});
+    const sequence = ++this.searchSequence, generation = this.generation;
+    const request = this.searchWork.then(() => {
+      if (sequence !== this.searchSequence || generation !== this.generation) throw Error("검색이 취소되었습니다.");
+      return this.call("query", {text});
+    });
+    this.searchWork = request.catch(() => {});
+    const vector = await request;
+    if (sequence !== this.searchSequence || generation !== this.generation) throw Error("검색이 취소되었습니다.");
     const results = loadPacks().flatMap(pack => pack.detail.map(con => ({...con, packageIdx: pack.info.package_idx})))
       .filter(con => this.vectors[this.key(con)])
       .map(con => ({con, score: this.vectors[this.key(con)].reduce((sum, value, i) => sum + value * vector[i], 0)}));
@@ -1648,13 +1700,16 @@ module.exports = class DCCon {
     BdApi.DOM.addStyle(this.meta.name, this.css);
 
     // 언어 변경 리스너 추가
-    LocaleStore.addChangeListener(() => {
-      this.strings = getLocaleStrings();
-    });
+    this.localeListener = () => {this.strings = getLocaleStrings();};
+    LocaleStore.addChangeListener(this.localeListener);
   }
 
   stop() {
     cacheGeneration++;
+    bufferGeneration++;
+    queuedCons.clear();
+    if (this.localeListener) LocaleStore.removeChangeListener?.(this.localeListener);
+    this.localeListener = null;
     Embedding.stop();
     BdApi.Patcher.unpatchAll(this.meta.name);
     PluginEvents.dispatch({ type: "DCCON_UNPATCH_ALL" });
