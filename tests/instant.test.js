@@ -62,7 +62,8 @@ function harness({uploadFails = false, postFails = false, missing = false, clean
     UI: {showToast: text => calls.errors.push(text)}, Logger: {error() {}},
   }};
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../discord-dccon.plugin.js'), 'utf8') +
-    '\nmodule.exports = {sendDCConMessage, inspectInstantSend, events: PluginEvents, activeQueue, removeBuffered, getDCConImage, setChannel: id => {currentChannelId = id;}};', context);
+    // Conversion itself is exercised with real WASM in webp.test.js; send tests use byte fixtures.
+    '\nWebPCache.convert = async bytes => bytes; module.exports = {WebPCache, sendDCConMessage, inspectInstantSend, events: PluginEvents, activeQueue, removeBuffered, getDCConImage, setChannel: id => {currentChannelId = id;}};', context);
   const api = context.module.exports;
   api.setChannel('test-channel');
   api.events.subscribe('DCCON_CLOSE', () => calls.closes++);
@@ -253,6 +254,39 @@ test('download failure creates no cached file and buffer is unchanged', async t 
   assert.equal(await api.sendDCConMessage(con, {keepOpen: true}), false);
   assert.equal(api.activeQueue('test-channel').length, 0);
   assert.equal(fs.existsSync(path.join(directory, 'discord-dccon-cache')), false);
+});
+
+test('new downloads are cached as WebP, and cache reads need no codec or download', async t => {
+  const directory = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'dccon-webp-test-'));
+  t.after(() => fs.rmSync(directory, {recursive: true, force: true}));
+  const cache = path.join(directory, 'discord-dccon-cache'); fs.mkdirSync(cache);
+  const file = path.join(cache, require('node:crypto').createHash('sha256').update('image:png').digest('hex'));
+  const original = Buffer.from([1, 2, 3]);
+  const webp = Buffer.from('UklGRiIAAABXRUJQVlA4IBYAAAAwAQCdASoBAAEADsD+JaQAA3AAAAAA', 'base64');
+  const first = harness({cacheDirectory: directory});
+  let conversions = 0;
+  first.api.WebPCache.convert = async bytes => {conversions++; assert.deepEqual(Buffer.from(bytes), original); return webp;};
+  const images = await Promise.all([first.api.getDCConImage(con), first.api.getDCConImage(con)]);
+  assert.equal(conversions, 1);
+  assert.equal(images[0].name, 'dccon.gif'); assert.equal(images[0].type, 'image/webp');
+  assert.deepEqual(fs.readFileSync(file), webp);
+  const second = harness({cacheDirectory: directory, fetchFails: true});
+  second.api.WebPCache.convert = () => assert.fail('cached WebP must not re-encode');
+  assert.equal(await second.api.sendDCConMessage(con), true);
+  assert.equal(second.calls.fetches, 0);
+  assert.equal(second.calls.uploads[0].item.file.type, 'image/webp');
+});
+
+test('conversion failure does not send or cache original bytes', async t => {
+  const directory = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'dccon-webp-fail-'));
+  t.after(() => fs.rmSync(directory, {recursive: true, force: true}));
+  const cache = path.join(directory, 'discord-dccon-cache'); fs.mkdirSync(cache);
+  const file = path.join(cache, require('node:crypto').createHash('sha256').update('image:png').digest('hex'));
+  const {api, calls} = harness({cacheDirectory: directory});
+  api.WebPCache.convert = async () => {throw Error('conversion failed');};
+  assert.equal(await api.sendDCConMessage(con), false);
+  assert.equal(fs.existsSync(file), false);
+  assert.equal(calls.uploads.length, 0); assert.equal(calls.fetches, 1);
 });
 
 test('empty cache file is fetched again; unsafe image identifiers stay within cache directory', async t => {

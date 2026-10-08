@@ -1,7 +1,7 @@
 /**
  * @name discord-dccon
  * @description 디스코드에서 디시콘을 쉽게 사용할 수 있게 도와주는 플러그인입니다.
- * @version 3.1.0
+ * @version 3.2.0
  * @author 80ROkWOC4j
  * @website https://github.com/80ROkWOC4j/discord-dccon
  * @source https://github.com/80ROkWOC4j/discord-dccon
@@ -290,7 +290,122 @@ class DCConButton extends BdApi.React.Component {
 
 // #region DCConPanel
 
+function imageFS(method, ...args) {
+  return new Promise((resolve, reject) => require("fs")[method](...args,
+    (error, value) => error ? reject(error) : resolve(value)));
+}
 // Disk cache uses hashed names so remote paths never become filesystem paths.
+function isWebP(bytes) {
+  return bytes.length >= 20 && String.fromCharCode(...bytes.slice(0, 4)) === "RIFF" &&
+    String.fromCharCode(...bytes.slice(8, 12)) === "WEBP";
+}
+function webpFile(bytes) { return new File([bytes], "dccon.gif", {type: "image/webp"}); }
+
+// Pinned libwebp WASM tools. No native executable or model runtime is required.
+const WebPCache = {
+  generation: 0, work: Promise.resolve(), assets: new Map(), downloads: new Set(),
+  specs: {
+    gif: {name: "gif2webp", version: "1.0.8", hashes: ["2cdc53ad32a68c4a99e7bb44fbf7b0a8a35fa0a2f4ba2f099345d9c02cffb3ed", "ae49d60df26fac796041ee0956873d7a33d05ffab3fbb123dfb7106654f1f748"]},
+    img: {name: "img2webp", version: "1.0.0", hashes: ["dc9e869dc195aebdf55a4866ee788e7ba6fe69b4e7fb144c275a756e9d9cf7bb", "109f43681b260e9fe30aa909533b19a4438abc73a8e3da4837df5eadf0d1ac86"]},
+  },
+  async runtime(kind, generation) {
+    if (this.assets.has(kind)) return this.assets.get(kind);
+    const task = (async () => {
+      const spec = this.specs[kind], result = [];
+      for (const [index, extension] of ["js", "wasm"].entries()) {
+        const hash = spec.hashes[index], digest = bytes => require("crypto").createHash("sha256").update(bytes).digest("hex");
+        const target = require("path").join(BdApi.Plugins.folder, "discord-dccon-cache", "webp-codecs", hash);
+        let bytes;
+        try {bytes = await imageFS("readFile", target, null);} catch { /* Download the pinned codec once. */ }
+        if (!bytes || typeof bytes === "string" || digest(bytes) !== hash) {
+          if (generation !== this.generation) throw Error("WebP 변환 중단됨");
+          const controller = new AbortController(); this.downloads.add(controller);
+          try {
+            const response = await BdApi.Net.fetch(`https://cdn.jsdelivr.net/npm/@libwebp-wasm/${spec.name}@${spec.version}/es/${spec.name}.${extension}`,
+              {responseType: "arraybuffer", signal: controller.signal});
+            if (response.ok === false || response.status >= 400) throw Error("WebP 변환기 다운로드 실패");
+            bytes = new Uint8Array(await response.arrayBuffer());
+            if (digest(bytes) !== hash) throw Error("WebP 변환기 무결성 확인 실패");
+            if (generation !== this.generation) throw Error("WebP 변환 중단됨");
+            await imageFS("mkdir", require("path").dirname(target), {recursive: true});
+            await imageFS("writeFile", target + ".tmp", bytes);
+            await imageFS("rename", target + ".tmp", target);
+          } finally {this.downloads.delete(controller);}
+        }
+        result.push(new Uint8Array(bytes));
+      }
+      return {source: new TextDecoder().decode(result[0]), wasm: result[1]};
+    })();
+    this.assets.set(kind, task);
+    try {return await task;} catch (error) {if (this.assets.get(kind) === task) this.assets.delete(kind); throw error;}
+  },
+  workerMain() {
+    const tools = new Map();
+    self.onmessage = async ({data: {bytes, kind, runtime}}) => {
+      try {
+        if (!tools.has(kind)) {
+          const url = URL.createObjectURL(new Blob([runtime.source], {type: "text/javascript"}));
+          try {tools.set(kind, {lib: await import(url), wasm: runtime.wasm});}
+          finally {URL.revokeObjectURL(url);}
+        }
+        const {lib, wasm} = tools.get(kind);
+        // Fresh instances reclaim CLI argv allocations and GIF decoder state between images.
+        const wasmURL = URL.createObjectURL(new Blob([wasm], {type: "application/wasm"}));
+        let module;
+        try {module = await (kind === "gif" ? lib.Gif2Webp : lib.Img2Webp)({locateFile: () => wasmURL});}
+        finally {URL.revokeObjectURL(wasmURL);}
+        module.FS.writeFile("/input", new Uint8Array(bytes));
+        const args = kind === "gif" ? ["-quiet", "-m", "4", "/input", "-o", "/output.webp"]
+          : ["-lossless", "-m", "4", "/input", "-o", "/output.webp"];
+        const parsed = (kind === "gif" ? lib.parseGif2WebpArgs : lib.parseImg2WebpArgs)(module, args);
+        if (module._main(...parsed) !== 0) throw Error("이미지를 WebP로 변환하지 못했습니다.");
+        const output = module.FS.readFile("/output.webp");
+        self.postMessage({bytes: output.buffer}, [output.buffer]);
+      } catch (error) {self.postMessage({error: error.message || String(error)});}
+    };
+  },
+  convert(bytes) {
+    if (isWebP(bytes)) return Promise.resolve(bytes);
+    const generation = this.generation;
+    const task = this.work.then(async () => {
+      if (generation !== this.generation) throw Error("WebP 변환 중단됨");
+      const kind = String.fromCharCode(...bytes.slice(0, 4)) === "GIF8" ? "gif" : "img";
+      const runtime = await this.runtime(kind, generation);
+      if (generation !== this.generation) throw Error("WebP 변환 중단됨");
+      if (!this.worker) {
+        // Method shorthand needs a function expression when serialized.
+        const source = this.workerMain.toString().replace(/^workerMain\(\)/, "function()");
+        const workerURL = URL.createObjectURL(new Blob([`(${source})()`], {type: "text/javascript"}));
+        try {this.worker = new Worker(workerURL, {type: "module"});} finally {URL.revokeObjectURL(workerURL);}
+        this.workerKinds = new Set();
+      }
+      const worker = this.worker;
+      return new Promise((resolve, reject) => {
+        this.reject = reject;
+        worker.onmessage = ({data}) => {
+          this.reject = null;
+          if (data.error) return reject(Error(data.error));
+          const converted = new Uint8Array(data.bytes);
+          if (!isWebP(converted)) return reject(Error("WebP 변환 결과가 올바르지 않습니다."));
+          this.workerKinds.add(kind);
+          resolve(converted);
+        };
+        worker.onerror = () => {this.stop(); reject(Error("WebP 변환기 실행 실패"));};
+        worker.postMessage({bytes, kind, runtime: this.workerKinds.has(kind) ? undefined : runtime});
+      });
+    });
+    this.work = task.catch(() => {});
+    return task;
+  },
+  stop() {
+    this.generation++;
+    for (const controller of this.downloads) controller.abort();
+    this.downloads.clear(); this.assets.clear();
+    this.worker?.terminate(); this.worker = null;
+    this.reject?.(Error("WebP 변환 중단됨")); this.reject = null;
+    this.work = Promise.resolve();
+  },
+};
 const imageRequests = new Map();
 async function getDCConImage(con) {
   const key = con.path + ":" + con.ext;
@@ -310,9 +425,7 @@ async function getDCConImage(con) {
         const cached = await fs.readFile(cachePath, null);
         // BetterDiscord defaults to UTF-8, unlike Node. Never construct an image from text.
         if (typeof cached === "string") throw Object.assign(new Error("Cache returned text"), {code: "CACHE_NOT_BINARY"});
-        if (cached.length) {
-          return new File([cached], `dccon.${con.ext}`, { type: con.ext === "jpg" ? "image/jpeg" : `image/${con.ext}` });
-        }
+        if (cached.length) return webpFile(cached);
       }
     } catch { /* Missing or unreadable cache: fetch the original. */ }
     const response = await BdApi.Net.fetch(DCConBaseURL + con.path, {
@@ -321,8 +434,9 @@ async function getDCConImage(con) {
     if (response.ok === false || response.status >= 400) throw new Error("디시콘 다운로드에 실패했습니다.");
     const contentType = response.headers?.get?.("content-type");
     if (contentType && /text\/html|application\/json/i.test(contentType)) throw new Error("이미지가 아닌 응답을 받았습니다.");
-    const bytes = new Uint8Array(await response.arrayBuffer());
-    if (!bytes.length) throw new Error("디시콘 이미지가 비어 있습니다.");
+    const original = new Uint8Array(await response.arrayBuffer());
+    if (!original.length) throw new Error("디시콘 이미지가 비어 있습니다.");
+    const bytes = await WebPCache.convert(original);
     if (fs && cachePath) {
       try {
         await fs.mkdir(require("path").dirname(cachePath), { recursive: true });
@@ -332,7 +446,7 @@ async function getDCConImage(con) {
         BdApi.Logger.error("discord-dccon", "Image cache write failed", error);
       }
     }
-    return new File([bytes], `dccon.${con.ext}`, { type: con.ext === "jpg" ? "image/jpeg" : `image/${con.ext}` });
+    return webpFile(bytes);
   })();
   imageRequests.set(key, request);
   try { return await request; } finally { imageRequests.delete(key); }
@@ -1122,7 +1236,7 @@ async function embeddingWorker() {
       for (let i = 0, j = 0; i < rgba.length; i += 4) {rgb[j++] = rgba[i]; rgb[j++] = rgba[i + 1]; rgb[j++] = rgba[i + 2];}
       images.push(new RawImage(rgb, canvas.width, canvas.height, 3));
     };
-    if (type === "image/gif") {
+    if (type === "image/gif" || type === "image/webp") {
       if (typeof ImageDecoder === "undefined") throw Error("이 환경은 GIF 프레임 디코딩을 지원하지 않습니다.");
       const decoder = new ImageDecoder({data: bytes, type});
       try {
@@ -1146,7 +1260,7 @@ async function embeddingWorker() {
             frames.push(new RawVideoFrame(images.at(-1), durations.slice(0, frameIndex).reduce((a, b) => a + b, 0) / 1000000));
           } finally {image.close();}
         }
-        video = new RawVideo(frames, total / 1000000);
+        if (count > 1) video = new RawVideo(frames, total / 1000000);
       } finally {decoder.close();}
     } else {
       const bitmap = await createImageBitmap(new Blob([bytes], {type}));
@@ -1373,7 +1487,7 @@ const Embedding = {
             if (generation !== this.generation) return;
             const bytes = await file.arrayBuffer();
             if (generation !== this.generation) return;
-            const vector = await this.call("image", {bytes, type: con.ext === "jpg" ? "image/jpeg" : `image/${con.ext}`});
+            const vector = await this.call("image", {bytes, type: file.type});
             if (generation !== this.generation) return;
             this.vectors[key] = vector; this.dirtyVectors++;
           }
@@ -1541,7 +1655,7 @@ class DCConSettingsPanel extends BdApi.React.Component {
       h("p", null, "진단은 자동으로 제출되지 않으며, 메시지를 보내거나 입력 중인 내용을 변경하지 않습니다."),
       h(Button, { text: this.state.diagnosticReport ? "진단 정보 새로고침" : "진단 정보 만들기", onClick: () => {
         const report = inspectInstantSend();
-        this.setState({ diagnosticReport: JSON.stringify({ pluginVersion: "3.1.0", generatedAt: new Date().toISOString(), ...report }, null, 2),
+        this.setState({ diagnosticReport: JSON.stringify({ pluginVersion: "3.2.0", generatedAt: new Date().toISOString(), ...report }, null, 2),
           copyStatus: "" });
       } }),
       this.state.diagnosticReport && h("div", null,
@@ -1667,6 +1781,7 @@ module.exports = class DCCon {
     if (this.localeListener) LocaleStore.removeChangeListener?.(this.localeListener);
     this.localeListener = null;
     Embedding.stop();
+    WebPCache.stop();
     BdApi.Patcher.unpatchAll(this.meta.name);
     PluginEvents.dispatch({ type: "DCCON_UNPATCH_ALL" });
     BdApi.DOM.removeStyle(this.meta.name);

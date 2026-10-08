@@ -30,7 +30,7 @@ async function scenario(file, initial, run) {
     Webpack: {getByKeys: () => ({locale: 'ko', addChangeListener() {}}), getStore: () => ({getUploads: () => nativeUploads}), getModule: () => ({addFiles: args => { uploads.push(args); nativeUploads.push({id: String(uploads.length), item: args.files[0]}); }}), Filters: {byKeys: () => () => true}},
   }};
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, '..', file), 'utf8') +
-    '\nmodule.exports = {DCConCategory, DCConSettingsPanel, Plugin: module.exports, DCConPanel, DCConItem, BufferTray: typeof BufferTray === "undefined" ? null : BufferTray, sendDCConMessage, PackThumbnail: typeof PackThumbnail === "undefined" ? null : PackThumbnail, events: PluginEvents, setChannel: id => { currentChannelId = id; }};', context);
+    '\nWebPCache.convert = async bytes => bytes; module.exports = {DCConCategory, DCConSettingsPanel, Plugin: module.exports, DCConPanel, DCConItem, BufferTray: typeof BufferTray === "undefined" ? null : BufferTray, sendDCConMessage, PackThumbnail: typeof PackThumbnail === "undefined" ? null : PackThumbnail, events: PluginEvents, setChannel: id => { currentChannelId = id; }};', context);
   const {DCConSettingsPanel, Plugin} = context.module.exports;
   const root = createRoot(document.getElementById('root'));
   const ref = React.createRef();

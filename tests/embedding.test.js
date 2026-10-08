@@ -250,9 +250,9 @@ test('index cancelled during file read cannot enqueue into a restarted worker', 
 test('index saves completed work before stopping after three errors', async () => {
   const {Embedding: e,setImageLoader}=runtime({dccons:[{info:{package_idx:1},detail:['a','b','c','d'].map(path=>({path,ext:'jpg'}))}]},undefined,{require});
   let calls=0,saved,type;e.ready=true;e.directory=()=>'/test';e.files=()=>({writeFile:async(_,text)=>{saved=JSON.parse(text);},rename:async()=>{}});
-  setImageLoader(async()=>({arrayBuffer:async()=>new ArrayBuffer(1)}));
+  setImageLoader(async()=>({type:'image/webp',arrayBuffer:async()=>new ArrayBuffer(1)}));
   e.call=async(_,args)=>{type=args.type;if(calls++>0)throw Error('decode failed');return [1];};
-  await e.index();assert.equal(type,'image/jpeg');assert.equal(e.status.phase,'오류');assert.ok(saved.vectors['a:jpg']);assert.equal(e.indexing,false);
+  await e.index();assert.equal(type,'image/webp');assert.equal(e.status.phase,'오류');assert.ok(saved.vectors['a:jpg']);assert.equal(e.indexing,false);
 });
 
 test('an old index error cannot overwrite restarted status after checkpoint completes', async () => {

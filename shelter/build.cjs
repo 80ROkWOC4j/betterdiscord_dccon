@@ -46,6 +46,7 @@ async function main() {
   await fs.copyFile(path.resolve(__dirname, '../install-betterdiscord.ps1'), path.join(betterdiscord, 'install.ps1'));
   await fs.writeFile(path.join(betterdiscord, 'discord-dccon.plugin.js'), source);
   for (const directory of [standalone, betterdiscord]) await fs.copyFile(path.resolve(__dirname, '../LICENSE'), path.join(directory, 'LICENSE'));
+  for (const directory of [standalone, betterdiscord]) await fs.copyFile(path.resolve(__dirname, '../THIRD_PARTY_NOTICES.md'), path.join(directory, 'THIRD_PARTY_NOTICES.md'));
   await fs.writeFile(path.join(standalone, 'shelter-version.json'), JSON.stringify({
     revision, source: 'https://github.com/uwu/shelter', builds: 'https://github.com/uwu/shelter-builds', license: 'CC0-1.0',
   }, null, 2) + '\n');
