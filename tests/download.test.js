@@ -21,8 +21,10 @@ function network(steps) {
       response.statusCode = step.status || 200;
       response.headers = {'content-type': ['application/octet-stream']};
       request.emit('response', response);
+      if (step.earlyClose) request.emit('close');
       response.emit('data', Buffer.from([0, 128, 255]));
-      if (step.error) response.emit('error', Error('Connection lost'));
+      if (step.truncated) response.emit('close');
+      else if (step.error) response.emit('error', Error('Connection lost'));
       else response.emit('end');
       request.emit('close');
     }
@@ -74,4 +76,13 @@ test('cancellation stops active downloads and pre-cancelled requests never start
 test('response errors reject without returning incomplete bytes', async () => {
   const n = network([{error: true}]);
   await assert.rejects(download(n.net, url), /Connection lost/);
+});
+
+test('request close does not discard a response still being received', async () => {
+  const result = await download(network([{earlyClose: true}]).net, url);
+  assert.deepEqual([...result.bytes], [0, 128, 255]);
+});
+
+test('response close before end rejects incomplete content', async () => {
+  await assert.rejects(download(network([{truncated: true}]).net, url), /closed before completion/);
 });

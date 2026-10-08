@@ -30,10 +30,16 @@ function createFiles(root, legacyRoot) {
       case 'readFile':
         try {return await fs.readFile(resolved, ...rest);}
         catch (error) {
-          // Existing BD cache is a read-only fallback. New cache goes to discord-dccon data.
-          if (error.code !== 'ENOENT' || !legacyRoot || !name.startsWith('/dccon/discord-dccon-cache/')) throw error;
+          // Imported BD data can refer to its cache or saved personal images; both stay read-only.
+          if (error.code !== 'ENOENT' || !legacyRoot ||
+              !(name.startsWith('/dccon/discord-dccon-cache/') || /^\/dccon\/discord-dccon-library\/[a-f0-9]{64}$/.test(name))) throw error;
           return fs.readFile(resolveFile(legacyRoot, name), ...rest);
         }
+      case 'unlink':
+        if (!/^\/dccon\/discord-dccon-library\/[a-f0-9]{64}$/.test(name)) throw Error('Invalid personal image path');
+        try {return await fs.unlink(resolved);}
+        catch (error) {if (error.code !== 'ENOENT') throw error;}
+        return;
       case 'writeFile': return fs.writeFile(resolved, ...rest);
       case 'mkdir': return fs.mkdir(resolved, ...rest);
       case 'rename': return fs.rename(resolved, resolveFile(root, rest[0]));
@@ -43,7 +49,7 @@ function createFiles(root, legacyRoot) {
 }
 function allowedDownload(value) {
   const url = new URL(value);
-  const hosts = ['dcinside.com', 'huggingface.co', 'hf.co', 'xethub.hf.co', 'cdn.jsdelivr.net'];
+  const hosts = ['dcinside.com', 'huggingface.co', 'hf.co', 'xethub.hf.co', 'cdn.jsdelivr.net', 'ac.arca.live'];
   if (url.protocol !== 'https:' || url.username || url.password ||
       !hosts.some(host => url.hostname === host || url.hostname.endsWith('.' + host))) throw Error('Unsupported download host');
   return url.href;
@@ -67,7 +73,6 @@ function download(net, input, options = {}, signal) {
     const abort = () => {finish(Error('Download aborted')); request.abort();};
     request.on('error', error => finish(error));
     request.on('abort', () => finish(Error('Download aborted')));
-    request.on('close', () => finish(Error('Download closed before completion')));
     request.on('redirect', (status, nextMethod, target, responseHeaders) => {
       try {
         url = allowedDownload(new URL(target, url).href);
@@ -87,6 +92,7 @@ function download(net, input, options = {}, signal) {
       response.on('aborted', () => finish(Error('Download aborted')));
       response.on('end', () => finish(null, {status: response.statusCode,
         headers: headers(response.headers), bytes: new Uint8Array(Buffer.concat(chunks))}));
+      response.on('close', () => finish(Error('Download closed before completion')));
     });
     signal?.addEventListener('abort', abort, {once: true});
     try {

@@ -20,7 +20,7 @@ async function scenario(file, initial, run) {
   const uploads = [];
   const nativeUploads = [];
   let requests = 0;
-  const context = {module: {exports: {}}, structuredClone, setTimeout, clearTimeout, Blob, File, URL, BdApi: {
+  const context = {module: {exports: {}}, structuredClone, setTimeout, clearTimeout, Blob, File, URL, AbortController, BdApi: {
     React,
     // Deliberately return the SAME object, as a cached BetterDiscord store can.
     Data: {load: (name, key) => {assert.equal(name, 'discord-dccon'); return data[key];}, save: (name, key, value) => {assert.equal(name, 'discord-dccon'); data[key] = value;}},
@@ -59,6 +59,20 @@ async function searchResult(ref) {
     {idx: '42', name: '고양이콘', seller: '테스트', thumbId: ''},
   ]}));
 }
+
+test('individual con management opens a URL form when clipboard is unavailable', async () => {
+  await scenario('discord-dccon.plugin.js', [], async ({click, errors}) => {
+    await click([...document.querySelectorAll('.dccon-tab-item')].find(item => item.textContent === '개별 콘'));
+    await click(document.querySelector('.dccon-personal > button'));
+    assert.equal(document.querySelectorAll('.dccon-personal-form input').length, 2);
+    assert.match(document.querySelector('[role="status"]').textContent, /링크를 입력/);
+    assert.equal(document.querySelector('button[type="submit"]').disabled, true);
+    const cancel = [...document.querySelectorAll('.dccon-personal-form button')].find(item => item.textContent === '취소');
+    await click(cancel);
+    assert.equal(document.querySelector('.dccon-personal-form'), null);
+    assert.deepEqual(errors, []);
+  });
+});
 
 test('one add and a rapid repeated remove keep storage and UI synchronized without changing tabs', async () => {
   await scenario('discord-dccon.plugin.js', [], async ({data, ref, click, errors, requests}) => {

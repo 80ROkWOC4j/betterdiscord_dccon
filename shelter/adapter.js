@@ -37,7 +37,7 @@ function createAdapter(shelter, native, webpack) {
     }
     return walk(tree);
   }
-  const fs = Object.fromEntries(['readFile', 'writeFile', 'mkdir', 'rename'].map(method => [method, (...args) => {
+  const fs = Object.fromEntries(['readFile', 'writeFile', 'mkdir', 'rename', 'unlink'].map(method => [method, (...args) => {
     const callback = args.pop();
     native.file(method, args).then(value => callback(null, value), error => callback(error));
   }]));

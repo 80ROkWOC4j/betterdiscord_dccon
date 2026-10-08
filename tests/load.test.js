@@ -73,7 +73,7 @@ test('pack navigation and search filter individual images without changing saved
     {info: {package_idx: 1, title: '고양이'}, detail: [{idx: 1, title: '안녕'}, {idx: 2, title: '잘자'}]},
     {info: {package_idx: 2, title: '강아지'}, detail: [{idx: 3, title: '안녕'}]},
   ];
-  const {DCConPanel} = load('discord-dccon.plugin.js', {components: true, api: {Data: {load: () => packs}}});
+  const {DCConPanel} = load('discord-dccon.plugin.js', {components: true, api: {Data: {load: (_, key) => key === 'dccons' ? packs : undefined}}});
   const panel = new DCConPanel({type: 'dccon'});
   panel.state.textFilter = '안녕';
   assert.equal(panel.filterDccons().length, 2);

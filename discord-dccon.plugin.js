@@ -1,7 +1,7 @@
 /**
  * @name discord-dccon
  * @description 디스코드에서 디시콘을 쉽게 사용할 수 있게 도와주는 플러그인입니다.
- * @version 3.2.0
+ * @version 3.3.0
  * @author 80ROkWOC4j
  * @website https://github.com/80ROkWOC4j/discord-dccon
  * @source https://github.com/80ROkWOC4j/discord-dccon
@@ -290,16 +290,140 @@ class DCConButton extends BdApi.React.Component {
 
 // #region DCConPanel
 
+const PERSONAL_PACK = "personal-cons";
+function personalFile(con) {
+  if (!/^personal:[a-f0-9]{64}$/.test(con.path)) throw Error("개별 콘 파일 정보가 올바르지 않습니다.");
+  return require("path").join(BdApi.Plugins.folder, "discord-dccon-library", con.path.slice(9));
+}
 function imageFS(method, ...args) {
   return new Promise((resolve, reject) => require("fs")[method](...args,
     (error, value) => error ? reject(error) : resolve(value)));
 }
+function personalCons() { return loadData("personalCons", []); }
+function pickerPacks() {
+  const packs = loadPacks(), detail = personalCons();
+  return detail.length ? [{info: {package_idx: PERSONAL_PACK, title: "개별 콘"}, detail}, ...packs] : packs;
+}
+function personalURL(text) {
+  let url;
+  try { url = new URL(text.trim()); } catch { throw Error("디시콘 또는 아카콘 이미지 링크를 입력해 주세요."); }
+  const dc = /^dcimg\d*\.dcinside\.com$/.test(url.hostname) && url.pathname === "/dccon.php" && /^[a-f0-9]+$/i.test(url.searchParams.get("no") || "");
+  const arca = url.hostname === "ac.arca.live";
+  if (url.protocol !== "https:" || url.username || url.password || url.port || (!dc && !arca))
+    throw Error("디시콘(dcimg*.dcinside.com) 또는 아카콘(ac.arca.live) 이미지 링크만 추가할 수 있습니다.");
+  url.hash = "";
+  return url;
+}
+async function personalVideo(bytes, signal) {
+  const video = document.createElement("video"), canvas = document.createElement("canvas");
+  const source = URL.createObjectURL(new Blob([bytes], {type: "video/mp4"}));
+  const wait = (event, start) => new Promise((resolve, reject) => {
+    let eventReady = false, frameReady = false;
+    const finish = error => {
+      clearTimeout(timer);
+      video.cancelVideoFrameCallback(frameCallback);
+      video.removeEventListener(event, ready); video.removeEventListener("error", failed);
+      signal?.removeEventListener("abort", aborted);
+      error ? reject(error) : resolve();
+    };
+    const ready = () => {eventReady = true; if (frameReady) finish();};
+    const failed = () => finish(Error("MP4 영상을 읽지 못했습니다."));
+    const aborted = () => finish(Error("추가가 취소되었습니다."));
+    const timer = setTimeout(() => finish(Error("영상 처리 시간이 초과되었습니다.")), 15000);
+    const frameCallback = video.requestVideoFrameCallback(() => {frameReady = true; if (eventReady) finish();});
+    video.addEventListener(event, ready); video.addEventListener("error", failed);
+    signal?.addEventListener("abort", aborted, {once: true});
+    if (signal?.aborted) aborted(); else start();
+  });
+  try {
+    video.muted = true; video.preload = "auto";
+    await wait("loadeddata", () => {video.src = source;});
+    if (!Number.isFinite(video.duration) || video.duration <= 0 || video.duration > 30)
+      throw Error("30초 이하의 아카콘 영상만 추가할 수 있습니다.");
+    canvas.width = video.videoWidth; canvas.height = video.videoHeight;
+    if (canvas.width * canvas.height > 512 * 512) throw Error("영상 해상도는 512×512 픽셀 이하의 면적이어야 합니다.");
+    const context = canvas.getContext("2d"), frames = [], count = Math.ceil(video.duration * 30);
+    for (let i = 0; i < count; i++) {
+      if (signal?.aborted) throw Error("추가가 취소되었습니다.");
+      if (i) await wait("seeked", () => {video.currentTime = i / 30;});
+      context.drawImage(video, 0, 0);
+      const png = await new Promise(resolve => canvas.toBlob(resolve, "image/png"));
+      if (!png) throw Error("영상 프레임을 읽지 못했습니다.");
+      frames.push({bytes: new Uint8Array(await png.arrayBuffer()), duration: Math.max(1,
+        Math.round(Math.min((i + 1) / 30, video.duration) * 1000) - Math.round(i / 30 * 1000))});
+    }
+    const result = await WebPCache.convert(new Uint8Array(), frames);
+    if (signal?.aborted) throw Error("추가가 취소되었습니다.");
+    return result;
+  } finally {video.removeAttribute("src"); video.load(); URL.revokeObjectURL(source);}
+}
+async function preparePersonalCon(text, signal) {
+  let url = personalURL(text);
+  let response;
+  for (let redirects = 0; redirects <= 5; redirects++) {
+    if (signal?.aborted) throw Error("추가가 취소되었습니다.");
+    response = await BdApi.Net.fetch(url.href, {responseType: "arraybuffer", redirect: "manual", signal,
+      headers: {Referer: url.hostname === "ac.arca.live" ? "https://arca.live/" : "https://dcimg5.dcinside.com"}});
+    if (![301, 302, 303, 307, 308].includes(response.status)) break;
+    const location = response.headers?.get?.("location");
+    if (!location || redirects === 5) throw Error("이미지 리디렉션을 처리하지 못했습니다.");
+    url = personalURL(new URL(location, url).href);
+  }
+  if (response.ok === false || response.status >= 400) throw Error("이미지를 가져오지 못했습니다. 링크가 만료되었는지 확인해 주세요.");
+  const limit = 10 * 1024 * 1024;
+  if (Number(response.headers?.get?.("content-length")) > limit) throw Error("10 MB 이하의 콘만 추가할 수 있습니다.");
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  if (!bytes.length || bytes.length > limit) throw Error("이미지가 비어 있거나 10 MB를 초과합니다.");
+  const starts = (...values) => values.every((value, index) => bytes[index] === value);
+  const ext = starts(137,80,78,71,13,10,26,10) ? "png" : starts(71,73,70,56) ? "gif"
+    : starts(255,216,255) ? "jpg" : starts(82,73,70,70) && bytes[8] === 87 && bytes[9] === 69 && bytes[10] === 66 && bytes[11] === 80 ? "webp"
+    : String.fromCharCode(...bytes.slice(4, 8)) === "ftyp" ? "mp4" : null;
+  if (!ext) throw Error("PNG, JPEG, GIF, WebP 또는 MP4 콘만 추가할 수 있습니다.");
+  const file = ext === "mp4" ? webpFile(await personalVideo(bytes, signal))
+    : new File([bytes], `discord-dccon.${ext}`, {type: ext === "jpg" ? "image/jpeg" : `image/${ext}`});
+  const bitmap = await createImageBitmap(file);
+  bitmap.close();
+  if (signal?.aborted) throw Error("추가가 취소되었습니다.");
+  const hash = require("crypto").createHash("sha256").update(bytes).digest("hex");
+  return {file, con: {idx: "personal-" + hash, path: "personal:" + hash, ext, title: "개별 콘", packageIdx: PERSONAL_PACK}};
+}
+async function storePersonalCon(prepared, title, signal) {
+  const {con, file} = prepared;
+  if (personalCons().some(item => item.path === con.path)) throw Error("이미 등록된 콘입니다.");
+  const target = personalFile(con);
+  await imageFS("mkdir", require("path").dirname(target), {recursive: true});
+  const bytes = await WebPCache.convert(new Uint8Array(await file.arrayBuffer()));
+  if (signal?.aborted) throw Error("추가가 취소되었습니다.");
+  await imageFS("writeFile", target + ".tmp", bytes);
+  await imageFS("rename", target + ".tmp", target);
+  // Re-read after disk IO so simultaneous saves cannot overwrite another entry.
+  const items = personalCons();
+  if (items.some(item => item.path === con.path)) throw Error("이미 등록된 콘입니다.");
+  saveData("personalCons", [...items, {...con, title: title.trim() || `개별 콘 ${items.length + 1}`}]);
+  PluginEvents.dispatch({type: "DCCON_PERSONAL_UPDATE"});
+}
+async function removePersonalCon(con) {
+  if ([...sendingChannels].some(channel => activeQueue(channel).some(entry => entry.con.path === con.path)))
+    throw Error("전송 중인 콘은 잠시 후 제거해 주세요.");
+  try { await imageFS("unlink", personalFile(con)); } catch (error) { if (error.code !== "ENOENT") throw error; }
+  saveData("personalCons", personalCons().filter(item => item.path !== con.path));
+  for (const key of ["favorites", "recent"]) saveData(key, loadData(key, []).filter(item => item.path !== con.path));
+  for (const [channel, entries] of queuedCons) updateQueue(channel, entries.filter(entry => entry.con.path !== con.path));
+  PluginEvents.dispatch({type: "DCCON_PERSONAL_UPDATE"});
+  PluginEvents.dispatch({type: "DCCON_FAVORITES_UPDATE"});
+  PluginEvents.dispatch({type: "DCCON_RECENT_UPDATE"});
+}
+
 // Disk cache uses hashed names so remote paths never become filesystem paths.
 function isWebP(bytes) {
   return bytes.length >= 20 && String.fromCharCode(...bytes.slice(0, 4)) === "RIFF" &&
     String.fromCharCode(...bytes.slice(8, 12)) === "WEBP";
 }
-function webpFile(bytes) { return new File([bytes], "dccon.gif", {type: "image/webp"}); }
+function webpFile(bytes) {
+  const animated = isWebP(bytes) && bytes.length >= 30 &&
+    String.fromCharCode(...bytes.slice(12, 16)) === "VP8X" && (bytes[20] & 0x02) !== 0;
+  return new File([bytes], animated ? "dccon.webp" : "dccon.gif", {type: "image/webp"});
+}
 
 // Pinned libwebp WASM tools. No native executable or model runtime is required.
 const WebPCache = {
@@ -341,7 +465,7 @@ const WebPCache = {
   },
   workerMain() {
     const tools = new Map();
-    self.onmessage = async ({data: {bytes, kind, runtime}}) => {
+    self.onmessage = async ({data: {bytes, kind, runtime, frames}}) => {
       try {
         if (!tools.has(kind)) {
           const url = URL.createObjectURL(new Blob([runtime.source], {type: "text/javascript"}));
@@ -351,11 +475,20 @@ const WebPCache = {
         const {lib, wasm} = tools.get(kind);
         // Fresh instances reclaim CLI argv allocations and GIF decoder state between images.
         const wasmURL = URL.createObjectURL(new Blob([wasm], {type: "application/wasm"}));
+        // This codec build has no wasmBinary hook. Serve its WASM fetch from
+        // memory inside this dedicated worker; Discord CSP can block blob fetches.
+        const fetch = self.fetch;
+        self.fetch = (input, options) => input === wasmURL
+          ? Promise.resolve(new Response(wasm, {headers: {"Content-Type": "application/wasm"}}))
+          : fetch(input, options);
         let module;
         try {module = await (kind === "gif" ? lib.Gif2Webp : lib.Img2Webp)({locateFile: () => wasmURL});}
-        finally {URL.revokeObjectURL(wasmURL);}
+        finally {self.fetch = fetch; URL.revokeObjectURL(wasmURL);}
         module.FS.writeFile("/input", new Uint8Array(bytes));
-        const args = kind === "gif" ? ["-quiet", "-m", "4", "/input", "-o", "/output.webp"]
+        const args = frames ? ["-loop", "0", "-lossless", "-m", "4", ...frames.flatMap((frame, index) => {
+          const name = `/frame${index}.png`; module.FS.writeFile(name, frame.bytes);
+          return ["-d", String(frame.duration), name];
+        }), "-o", "/output.webp"] : kind === "gif" ? ["-quiet", "-m", "4", "/input", "-o", "/output.webp"]
           : ["-lossless", "-m", "4", "/input", "-o", "/output.webp"];
         const parsed = (kind === "gif" ? lib.parseGif2WebpArgs : lib.parseImg2WebpArgs)(module, args);
         if (module._main(...parsed) !== 0) throw Error("이미지를 WebP로 변환하지 못했습니다.");
@@ -364,7 +497,7 @@ const WebPCache = {
       } catch (error) {self.postMessage({error: error.message || String(error)});}
     };
   },
-  convert(bytes) {
+  convert(bytes, frames) {
     if (isWebP(bytes)) return Promise.resolve(bytes);
     const generation = this.generation;
     const task = this.work.then(async () => {
@@ -391,7 +524,7 @@ const WebPCache = {
           resolve(converted);
         };
         worker.onerror = () => {this.stop(); reject(Error("WebP 변환기 실행 실패"));};
-        worker.postMessage({bytes, kind, runtime: this.workerKinds.has(kind) ? undefined : runtime});
+        worker.postMessage({bytes, kind, frames, runtime: this.workerKinds.has(kind) ? undefined : runtime});
       });
     });
     this.work = task.catch(() => {});
@@ -411,6 +544,12 @@ async function getDCConImage(con) {
   const key = con.path + ":" + con.ext;
   if (imageRequests.has(key)) return imageRequests.get(key);
   const request = (async () => {
+    if (con.path.startsWith("personal:")) {
+      const target = personalFile(con);
+      const bytes = await imageFS("readFile", target, null);
+      if (typeof bytes === "string") throw Error("개별 콘 파일을 읽지 못했습니다.");
+      return webpFile(bytes);
+    }
     let fs, cachePath;
     try {
       if (typeof require === "function" && BdApi.Plugins?.folder) {
@@ -687,6 +826,78 @@ class BufferImage extends BdApi.React.Component {
   render() { return this.state.url && BdApi.React.createElement("img", {src: this.state.url, alt: this.props.title}); }
 }
 
+class PersonalImage extends BdApi.React.Component {
+  constructor(props) { super(props); this.state = {file: null}; }
+  componentDidMount() {
+    getDCConImage(this.props.con).then(file => {
+      if (!this.disposed) this.setState({file});
+    }).catch(() => { if (!this.disposed) this.props.onError?.(); });
+  }
+  componentWillUnmount() { this.disposed = true; }
+  render() { return this.state.file && BdApi.React.createElement(BufferImage, {file: this.state.file, title: this.props.con.title}); }
+}
+
+class PersonalConManager extends BdApi.React.Component {
+  constructor(props) {
+    super(props);
+    this.state = {items: personalCons(), open: false, input: "", title: "", prepared: null, busy: false, message: ""};
+    this.refresh = () => this.setState({items: personalCons()});
+  }
+  componentDidMount() { PluginEvents.subscribe("DCCON_PERSONAL_UPDATE", this.refresh); }
+  componentWillUnmount() {
+    this.disposed = true;
+    this.controller?.abort();
+    PluginEvents.unsubscribe("DCCON_PERSONAL_UPDATE", this.refresh);
+  }
+  async work(action) {
+    if (this.working) return;
+    this.working = true;
+    this.controller = new AbortController();
+    this.setState({busy: true, message: ""});
+    try { await action(this.controller.signal); }
+    catch (error) { if (!this.disposed) this.setState({message: error.message}); }
+    finally { this.working = false; if (!this.disposed) this.setState({busy: false}); }
+  }
+  open() {
+    this.setState({open: true, input: "", title: "", prepared: null});
+    return this.work(async signal => {
+      let text;
+      try { text = await navigator.clipboard.readText(); personalURL(text); }
+      catch { if (!this.disposed) this.setState({message: "디시콘 또는 아카콘 이미지 링크를 입력해 주세요."}); return; }
+      if (signal.aborted) return;
+      this.setState({input: text});
+      const prepared = await preparePersonalCon(text, signal);
+      if (!signal.aborted) this.setState({prepared, message: "클립보드의 이미지입니다. 확인 후 추가해 주세요."});
+    });
+  }
+  add() {
+    return this.work(async signal => {
+      const prepared = this.state.prepared || await preparePersonalCon(this.state.input, signal);
+      if (signal.aborted) return;
+      await storePersonalCon(prepared, this.state.title, signal);
+      if (!this.disposed) this.setState({open: false, prepared: null, message: "개별 콘에 추가했습니다."});
+    });
+  }
+  render() {
+    const h = BdApi.React.createElement, s = this.state;
+    return h("div", {className: "dccon-personal"},
+      h("button", {type: "button", className: "dccon-button", disabled: s.busy, onClick: () => this.open()}, "콘 추가"),
+      s.open && h("form", {className: "dccon-personal-form", onSubmit: event => {event.preventDefault(); this.add();}},
+        h("label", null, "이미지 링크", h("input", {value: s.input, disabled: s.busy, placeholder: "디시콘 · 아카콘 이미지 URL", onChange: e => this.setState({input: e.target.value, prepared: null})})),
+        h("label", null, "이름 (선택)", h("input", {value: s.title, disabled: s.busy, maxLength: 100, onChange: e => this.setState({title: e.target.value})})),
+        s.prepared && h("div", {className: "dccon-personal-preview"}, h(BufferImage, {file: s.prepared.file, title: "추가할 콘 미리보기"})),
+        h("div", {className: "dccon-personal-actions"},
+          h("button", {type: "submit", className: "dccon-button", disabled: s.busy || !s.input.trim()}, s.busy ? "처리 중…" : "추가"),
+          h("button", {type: "button", className: "dccon-button", disabled: s.busy, onClick: () => this.setState({open: false, prepared: null, message: ""})}, "취소"))),
+      h("p", {role: "status"}, s.busy ? "이미지를 처리하고 있습니다…" : s.message),
+      !s.items.length && h("p", null, "개별 이미지를 등록하면 내 디시콘의 ‘개별 콘’에서 사용할 수 있습니다."),
+      ...s.items.map(con => h("div", {className: "dccon-card", key: con.path},
+        h("div", {className: "dccon-personal-preview"}, h(PersonalImage, {con})),
+        h("div", {className: "dccon-card-content"}, h("h3", null, con.title)),
+        h("button", {type: "button", className: "dccon-button", disabled: s.busy, onClick: () => this.work(() => removePersonalCon(con))}, "제거"))));
+  }
+}
+
 class PackThumbnail extends BdApi.React.Component {
   constructor(props) {
     super(props);
@@ -695,6 +906,7 @@ class PackThumbnail extends BdApi.React.Component {
 
   render() {
     const { pack, className } = this.props;
+    if (pack.info.package_idx === PERSONAL_PACK) return BdApi.React.createElement("span", {className, "aria-hidden": true}, "▧");
     const paths = [...new Set([pack.info.main_img_path, pack.detail[0]?.path, pack.info.list_img_path].filter(Boolean))];
     if (!paths[this.state.index]) {
       return BdApi.React.createElement("span", { className, "aria-hidden": true }, pack.info.title.slice(0, 1));
@@ -826,6 +1038,7 @@ class DCConItem extends BdApi.React.Component {
         "aria-label": con.title, className: "dccon-item", disabled: this.state.busy || this.state.error,
         onClick: event => this.attach(event),
       }, this.state.error ? h("span", { className: "dccon-item-error" }, "이미지 로드 실패")
+        : con.path.startsWith("personal:") ? h(PersonalImage, {con, onError: () => this.setState({error: true})})
         : h("img", { src: DCConProxyURL + con.path, alt: con.title, loading: "lazy", onError: () => this.setState({ error: true }) }),
         this.state.busy && h("span", { className: "dccon-loading", role: "status" }, "처리 중…")
       ),
@@ -840,7 +1053,11 @@ class DCConItem extends BdApi.React.Component {
 class DCConPanel extends BdApi.React.Component {
   constructor(props) {
     super(props);
-    this.state = { textFilter: "", selected: "all", dccons: loadPacks() };
+    this.state = { textFilter: "", selected: "all", dccons: pickerPacks() };
+    this.personalRefresh = () => {
+      this.setState({dccons: pickerPacks(), semanticResults: (this.state.semanticResults || []).filter(({con}) =>
+        !con.path.startsWith("personal:") || personalCons().some(item => item.path === con.path))});
+    };
     this.clearSearch = () => this.changeSearch("");
     this.refresh = () => this.setState({ revision: (this.state.revision ?? 0) + 1 });
     this.embeddingRefresh = () => {
@@ -852,6 +1069,7 @@ class DCConPanel extends BdApi.React.Component {
   }
 
   componentDidMount() {
+    PluginEvents.subscribe("DCCON_PERSONAL_UPDATE", this.personalRefresh);
     PluginEvents.subscribe("DCCON_FAVORITES_UPDATE", this.refresh);
     PluginEvents.subscribe("DCCON_RECENT_UPDATE", this.refresh);
     this.mounted = true;
@@ -859,6 +1077,7 @@ class DCConPanel extends BdApi.React.Component {
   }
 
   componentWillUnmount() {
+    PluginEvents.unsubscribe("DCCON_PERSONAL_UPDATE", this.personalRefresh);
     PluginEvents.unsubscribe("DCCON_FAVORITES_UPDATE", this.refresh);
     PluginEvents.unsubscribe("DCCON_RECENT_UPDATE", this.refresh);
     this.mounted = false; clearTimeout(this.searchTimer); this.searchGeneration = (this.searchGeneration || 0) + 1;
@@ -978,7 +1197,7 @@ function loadData(key, defaultData) {
 
 function saveData(key, data) {
   BdApi.Data.save("discord-dccon", key, data);
-  if (key === "dccons" && Embedding.enabled()) void Embedding.index();
+  if (["dccons", "personalCons"].includes(key) && Embedding.enabled()) void Embedding.index();
 }
 
 function uniquePacks(packs) {
@@ -1465,7 +1684,7 @@ const Embedding = {
     if (this.indexing) {this.reindex = true; return;}
     this.indexing = true;
     const generation = this.generation;
-    const items = [...new Map(loadPacks().flatMap(pack => pack.detail).map(con => [this.key(con), con])).values()];
+    const items = [...new Map(pickerPacks().flatMap(pack => pack.detail).map(con => [this.key(con), con])).values()];
     const active = new Set(items.map(con => this.key(con)));
     for (const key of Object.keys(this.vectors)) if (!active.has(key)) {delete this.vectors[key]; this.dirtyVectors++;}
     this.update({phase: "이미지 색인", total: items.length, completed: 0, errors: 0, error: "", file: ""});
@@ -1527,7 +1746,7 @@ const Embedding = {
     this.searchWork = request.catch(() => {});
     const vector = await request;
     if (sequence !== this.searchSequence || generation !== this.generation) throw Error("검색이 취소되었습니다.");
-    const results = loadPacks().flatMap(pack => pack.detail.map(con => ({...con, packageIdx: pack.info.package_idx})))
+    const results = pickerPacks().flatMap(pack => pack.detail.map(con => ({...con, packageIdx: pack.info.package_idx})))
       .filter(con => this.vectors[this.key(con)])
       .map(con => ({con, score: this.vectors[this.key(con)].reduce((sum, value, i) => sum + value * vector[i], 0)}));
     const unique = new Map();
@@ -1655,7 +1874,7 @@ class DCConSettingsPanel extends BdApi.React.Component {
       h("p", null, "진단은 자동으로 제출되지 않으며, 메시지를 보내거나 입력 중인 내용을 변경하지 않습니다."),
       h(Button, { text: this.state.diagnosticReport ? "진단 정보 새로고침" : "진단 정보 만들기", onClick: () => {
         const report = inspectInstantSend();
-        this.setState({ diagnosticReport: JSON.stringify({ pluginVersion: "3.2.0", generatedAt: new Date().toISOString(), ...report }, null, 2),
+        this.setState({ diagnosticReport: JSON.stringify({ pluginVersion: "3.3.0", generatedAt: new Date().toISOString(), ...report }, null, 2),
           copyStatus: "" });
       } }),
       this.state.diagnosticReport && h("div", null,
@@ -1720,11 +1939,11 @@ class DCConSettingsPanel extends BdApi.React.Component {
     }
     return h("div", {className: "dccon-settings-panel"},
       h("div", {className: "dccon-tab-menu"},
-        ...[["saved", "내 디시콘"], ["shop", "디시콘샵"]].map(([tab, label]) => h("button", {
+        ...[["saved", "내 디시콘"], ["shop", "디시콘샵"], ["personal", "개별 콘"]].map(([tab, label]) => h("button", {
           key: tab, type: "button", className: "dccon-tab-item " + (this.state.activeTab === tab ? "active" : ""),
           onClick: () => this.handleTabChange(tab),
         }, label))),
-      h("div", {className: "dccon-tab-content"}, this.state.activeTab === "saved" ? this.renderSaved() : this.renderSearch()));
+      h("div", {className: "dccon-tab-content"}, this.state.activeTab === "saved" ? this.renderSaved() : this.state.activeTab === "personal" ? h(PersonalConManager) : this.renderSearch()));
   }
 
 }
@@ -1905,6 +2124,14 @@ module.exports = class DCCon {
 .dccon-empty-state { padding: 32px 16px; text-align: center; color: var(--dc-muted); grid-column: 1 / -1; }
 .dccon-empty-state button { display: block; margin: 16px auto 0; border-radius: 4px; padding: 8px 12px; background: var(--dc-accent); color: #fff; }
 .dccon-settings-panel { padding: 12px; }
+.dccon-personal-form { display: grid; gap: 10px; margin-top: 12px; }
+.dccon-personal-form label { display: grid; gap: 6px; }
+.dccon-personal-form input { width: 100%; min-width: 0; padding: 8px; border: 1px solid #80808033; border-radius: 4px; background: var(--dc-inset); }
+.dccon-personal-actions { display: flex; gap: 8px; }
+.dccon-personal p { margin: 12px 0; color: var(--dc-muted); }
+.dccon-personal .dccon-card { align-items: center; margin-top: 8px; }
+.dccon-personal-preview { width: 72px; height: 72px; flex-shrink: 0; }
+.dccon-personal-preview img { width: 100%; height: 100%; object-fit: contain; }
 .dccon-user-settings { overflow-y: auto; }
 .dccon-user-settings h3 { margin: 0 0 12px; font-size: 16px; color: var(--dc-text); }
 .dccon-user-settings .dccon-diagnostics { border-top: 1px solid #80808033; margin-top: 20px; padding-top: 20px; }
