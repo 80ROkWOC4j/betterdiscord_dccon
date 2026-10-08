@@ -12,7 +12,8 @@ function harness(t, options = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dccon-personal-test-'));
   t.after(() => fs.rmSync(dir, {recursive: true, force: true}));
   const data = {}, calls = [];
-  const context = {module: {exports: {}}, require, structuredClone, setTimeout, clearTimeout, File, Blob, URL, AbortController,
+  const context = {module: {exports: {}}, require: name => name === 'electron' && options.nativeClipboard
+    ? {clipboard: {readText: options.nativeClipboard}} : require(name), structuredClone, setTimeout, clearTimeout, File, Blob, URL, AbortController,
     convert: options.convert || (async bytes => bytes), document: options.document,
     navigator: {clipboard: {readText: options.clipboard || (async () => url)}},
     createImageBitmap: async () => ({close() {}}),
@@ -66,6 +67,21 @@ test('clipboard denial falls back to input; manual submission saves directly and
   assert.equal(h.calls.length, 1);
   assert.equal(h.data.personalCons.length, 1);
   assert.equal(manager.state.open, false);
+});
+
+test('native clipboard previews only after clicking add and needs confirmation before saving', async t => {
+  let reads = 0, browserReads = 0;
+  const h = harness(t, {nativeClipboard: () => {reads++; return url;},
+    clipboard: async () => {browserReads++; throw Error('Browser clipboard denied');}});
+  const manager = new h.PersonalConManager({});
+  assert.equal(reads, 0);
+  await manager.open();
+  assert.equal(reads, 1);
+  assert.equal(browserReads, 0);
+  assert.ok(manager.state.prepared);
+  assert.equal(h.data.personalCons, undefined);
+  await manager.add();
+  assert.equal(h.data.personalCons.length, 1);
 });
 
 test('invalid URLs, non-images, oversize images and unsafe redirects cannot be registered', async t => {

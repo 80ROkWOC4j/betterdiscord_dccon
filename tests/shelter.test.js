@@ -279,8 +279,10 @@ test('preload injects only the configured channel main frame and always loads or
   const source = await fs.readFile(path.join(__dirname, '../shelter/preload.cjs'), 'utf8');
   for (const channel of ['Stable', 'Canary']) for (const allowed of [true, false]) {
     const origin = channelOptions(channel).origin, calls = [];
+    let bridge, reads = 0;
     const electron = {ipcRenderer: {sendSync: () => ({origin, originalPreload: 'original', bundle: 'bundle'})},
-      contextBridge: {exposeInMainWorld: () => calls.push('bridge')},
+      clipboard: {readText: () => {reads++; return 'clipboard-url';}},
+      contextBridge: {exposeInMainWorld: (_, value) => {bridge = value; calls.push('bridge');}},
       webFrame: {executeJavaScript: () => {calls.push('injected'); return Promise.resolve();}}};
     vm.runInNewContext(source, {process: {isMainFrame: true}, location: {origin: allowed ? origin : 'https://example.com'},
       require(name) {
@@ -289,6 +291,12 @@ test('preload injects only the configured channel main frame and always loads or
         assert.equal(name, 'original'); calls.push('original');
       }});
     assert.deepEqual(calls, allowed ? ['bridge', 'injected', 'original'] : ['original']);
+    assert.equal(reads, 0);
+    if (allowed) {
+      const {requireNative} = createAdapter({plugin: {store: {}, flushStore() {}}, flux: {storesFlat: {}}}, {...bridge, initialData: {}}, {});
+      assert.equal(requireNative('electron').clipboard.readText(), 'clipboard-url');
+      assert.equal(reads, 1);
+    } else assert.equal(bridge, undefined);
   }
 });
 

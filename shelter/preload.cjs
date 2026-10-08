@@ -1,4 +1,4 @@
-const {ipcRenderer, contextBridge, webFrame} = require('electron');
+const {ipcRenderer, contextBridge, webFrame, clipboard} = require('electron');
 const {createFiles, hash} = require('./native');
 const config = ipcRenderer.sendSync('dccon:init');
 if (config && process.isMainFrame && location.origin === config.origin) {
@@ -6,6 +6,7 @@ if (config && process.isMainFrame && location.origin === config.origin) {
     initialData: config.initialData,
     file: createFiles(config.dataRoot, config.legacyRoot),
     hash,
+    readClipboardText: () => clipboard.readText(),
     fetch: (id, url, options) => ipcRenderer.invoke('dccon:fetch', id, url, options),
     abort: id => ipcRenderer.send('dccon:abort', id),
   });

@@ -42,6 +42,7 @@ function createAdapter(shelter, native, webpack) {
     native.file(method, args).then(value => callback(null, value), error => callback(error));
   }]));
   const requireNative = name => {
+    if (name === 'electron') return {clipboard: {readText: () => native.readClipboardText()}};
     if (name === 'fs') return fs;
     if (name === 'path') return {join: (...parts) => parts.join('/'), dirname: value => value.slice(0, value.lastIndexOf('/'))};
     if (name === 'crypto') return {createHash: algorithm => {

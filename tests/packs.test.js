@@ -65,7 +65,7 @@ test('individual con management opens a URL form when clipboard is unavailable',
     await click([...document.querySelectorAll('.dccon-tab-item')].find(item => item.textContent === '개별 콘'));
     await click(document.querySelector('.dccon-personal > button'));
     assert.equal(document.querySelectorAll('.dccon-personal-form input').length, 2);
-    assert.match(document.querySelector('[role="status"]').textContent, /링크를 입력/);
+    assert.match(document.querySelector('[role="status"]').textContent, /링크를 직접 입력/);
     assert.equal(document.querySelector('button[type="submit"]').disabled, true);
     const cancel = [...document.querySelectorAll('.dccon-personal-form button')].find(item => item.textContent === '취소');
     await click(cancel);

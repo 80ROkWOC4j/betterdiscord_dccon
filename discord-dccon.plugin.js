@@ -1,7 +1,7 @@
 /**
  * @name discord-dccon
  * @description 디스코드에서 디시콘을 쉽게 사용할 수 있게 도와주는 플러그인입니다.
- * @version 3.3.0
+ * @version 3.3.1
  * @author 80ROkWOC4j
  * @website https://github.com/80ROkWOC4j/discord-dccon
  * @source https://github.com/80ROkWOC4j/discord-dccon
@@ -823,7 +823,7 @@ class BufferImage extends BdApi.React.Component {
     }
   }
   componentWillUnmount() { if (this.state.url) URL.revokeObjectURL(this.state.url); }
-  render() { return this.state.url && BdApi.React.createElement("img", {src: this.state.url, alt: this.props.title}); }
+  render() { return this.state.url && BdApi.React.createElement("img", {src: this.state.url, alt: this.props.title, className: this.props.className}); }
 }
 
 class PersonalImage extends BdApi.React.Component {
@@ -834,7 +834,7 @@ class PersonalImage extends BdApi.React.Component {
     }).catch(() => { if (!this.disposed) this.props.onError?.(); });
   }
   componentWillUnmount() { this.disposed = true; }
-  render() { return this.state.file && BdApi.React.createElement(BufferImage, {file: this.state.file, title: this.props.con.title}); }
+  render() { return this.state.file && BdApi.React.createElement(BufferImage, {file: this.state.file, title: this.props.con.title, className: this.props.className}); }
 }
 
 class PersonalConManager extends BdApi.React.Component {
@@ -862,8 +862,15 @@ class PersonalConManager extends BdApi.React.Component {
     this.setState({open: true, input: "", title: "", prepared: null});
     return this.work(async signal => {
       let text;
-      try { text = await navigator.clipboard.readText(); personalURL(text); }
-      catch { if (!this.disposed) this.setState({message: "디시콘 또는 아카콘 이미지 링크를 입력해 주세요."}); return; }
+      try {
+        try { text = await require("electron").clipboard.readText(); }
+        catch { text = await navigator.clipboard.readText(); }
+      } catch {
+        if (!this.disposed) this.setState({message: "클립보드를 읽지 못했습니다. 이미지 링크를 직접 입력해 주세요."});
+        return;
+      }
+      try { personalURL(text); }
+      catch { if (!this.disposed) this.setState({message: "클립보드에 지원되는 링크가 없습니다. 디시콘 또는 아카콘 이미지 링크를 입력해 주세요."}); return; }
       if (signal.aborted) return;
       this.setState({input: text});
       const prepared = await preparePersonalCon(text, signal);
@@ -906,7 +913,10 @@ class PackThumbnail extends BdApi.React.Component {
 
   render() {
     const { pack, className } = this.props;
-    if (pack.info.package_idx === PERSONAL_PACK) return BdApi.React.createElement("span", {className, "aria-hidden": true}, "▧");
+    if (pack.info.package_idx === PERSONAL_PACK) {
+      const con = pack.detail[0];
+      return con ? BdApi.React.createElement(PersonalImage, {key: con.path, con, className}) : null;
+    }
     const paths = [...new Set([pack.info.main_img_path, pack.detail[0]?.path, pack.info.list_img_path].filter(Boolean))];
     if (!paths[this.state.index]) {
       return BdApi.React.createElement("span", { className, "aria-hidden": true }, pack.info.title.slice(0, 1));
@@ -1874,7 +1884,7 @@ class DCConSettingsPanel extends BdApi.React.Component {
       h("p", null, "진단은 자동으로 제출되지 않으며, 메시지를 보내거나 입력 중인 내용을 변경하지 않습니다."),
       h(Button, { text: this.state.diagnosticReport ? "진단 정보 새로고침" : "진단 정보 만들기", onClick: () => {
         const report = inspectInstantSend();
-        this.setState({ diagnosticReport: JSON.stringify({ pluginVersion: "3.3.0", generatedAt: new Date().toISOString(), ...report }, null, 2),
+        this.setState({ diagnosticReport: JSON.stringify({ pluginVersion: "3.3.1", generatedAt: new Date().toISOString(), ...report }, null, 2),
           copyStatus: "" });
       } }),
       this.state.diagnosticReport && h("div", null,
