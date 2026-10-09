@@ -109,6 +109,45 @@ test('Shift accumulates only private buffer; normal click sends one batch withou
   assert.notEqual(calls.posts[0].body.nonce, calls.posts[1].body.nonce);
 });
 
+test('buffer-only send preserves order and duplicates without fetching or appending another image', async () => {
+  const {api, calls, data} = harness();
+  const second = {...con, path: 'second', title: 'second'};
+  for (const item of [con, second, con]) await api.sendDCConMessage(item, {keepOpen: true});
+  const files = Array.from(api.activeQueue('test-channel'), entry => entry.file);
+  const fetches = calls.fetches;
+  assert.equal(await api.sendDCConMessage(null), true);
+  assert.deepEqual(calls.uploads.map(upload => upload.item.file), files);
+  assert.equal(calls.fetches, fetches);
+  assert.equal(calls.posts.length, 1);
+  assert.equal(calls.posts[0].body.attachments.length, 3);
+  assert.equal(api.activeQueue('test-channel').length, 0);
+  assert.deepEqual(Array.from(data.recent, item => item.path), ['image', 'second']);
+});
+
+test('buffer-only send uses the preview channel and waits for pending additions', async () => {
+  const {api, calls} = harness();
+  const adding = api.sendDCConMessage(con, {keepOpen: true});
+  api.setChannel('other');
+  const sending = api.sendDCConMessage(null, {channelId: 'test-channel'});
+  assert.equal(await adding, true);
+  assert.equal(await sending, true);
+  assert.equal(calls.posts[0].url, '/channels/test-channel/messages');
+  assert.equal(calls.posts[0].body.attachments.length, 1);
+  assert.equal(await api.sendDCConMessage(null), false);
+  assert.equal(calls.posts.length, 1);
+});
+
+test('failed buffer-only send preserves the preview and rejects duplicate send clicks', async () => {
+  const {api, calls} = harness({postFails: true});
+  await api.sendDCConMessage(con, {keepOpen: true});
+  const sending = api.sendDCConMessage(null);
+  assert.equal(await api.sendDCConMessage(null), false);
+  assert.equal(await sending, false);
+  assert.equal(calls.posts.length, 1);
+  assert.equal(api.activeQueue('test-channel').length, 1);
+  assert.equal(calls.closes, 0);
+});
+
 for (const failure of ['uploadFails', 'postFails', 'missing']) {
   test(`${failure}: no close, no recent update, no staging fallback or automatic resend`, async () => {
     const {api, calls, data} = harness({[failure]: true});

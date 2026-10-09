@@ -20,8 +20,8 @@ async function scenario(file, initial, run) {
   const uploads = [];
   const nativeUploads = [];
   let requests = 0;
-  const context = {module: {exports: {}}, structuredClone, setTimeout, clearTimeout, Blob, File, URL, AbortController, BdApi: {
-    React,
+  const context = {module: {exports: {}}, window: dom.window, document: dom.window.document, structuredClone, setTimeout, clearTimeout, Blob, File, URL, AbortController, BdApi: {
+    React, ReactDOM: require('react-dom'),
     // Deliberately return the SAME object, as a cached BetterDiscord store can.
     Data: {load: (name, key) => {assert.equal(name, 'discord-dccon'); return data[key];}, save: (name, key, value) => {assert.equal(name, 'discord-dccon'); data[key] = value;}},
     Net: {fetch: async () => { requests++; return {text: async () => JSON.stringify(pack(42)), arrayBuffer: async () => new Uint8Array([1, 2, 3]).buffer}; }},
@@ -30,7 +30,7 @@ async function scenario(file, initial, run) {
     Webpack: {getByKeys: () => ({locale: 'ko', addChangeListener() {}}), getStore: () => ({getUploads: () => nativeUploads}), getModule: () => ({addFiles: args => { uploads.push(args); nativeUploads.push({id: String(uploads.length), item: args.files[0]}); }}), Filters: {byKeys: () => () => true}},
   }};
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, '..', file), 'utf8') +
-    '\nWebPCache.convert = async bytes => bytes; module.exports = {DCConCategory, DCConSettingsPanel, Plugin: module.exports, DCConPanel, DCConItem, BufferTray: typeof BufferTray === "undefined" ? null : BufferTray, sendDCConMessage, PackThumbnail: typeof PackThumbnail === "undefined" ? null : PackThumbnail, events: PluginEvents, setChannel: id => { currentChannelId = id; }};', context);
+    '\nWebPCache.convert = async bytes => bytes; module.exports = {DCConButton, DCConCategory, DCConSettingsPanel, Plugin: module.exports, DCConPanel, DCConItem, BufferTray: typeof BufferTray === "undefined" ? null : BufferTray, sendDCConMessage, PackThumbnail: typeof PackThumbnail === "undefined" ? null : PackThumbnail, events: PluginEvents, setChannel: id => { currentChannelId = id; }};', context);
   const {DCConSettingsPanel, Plugin} = context.module.exports;
   const root = createRoot(document.getElementById('root'));
   const ref = React.createRef();
@@ -222,6 +222,29 @@ test('settings no longer offer removed send modes', async () => {
   });
 });
 
+test('buffer expands to the left without remounting the picker and collapses when cleared', async () => {
+  await scenario('discord-dccon.plugin.js', [], async ({root, DCConButton, sendDCConMessage, click, errors}) => {
+    await React.act(async () => root.render(React.createElement(DCConButton, {channelId: 'side-buffer'})));
+    await click(document.querySelector('[aria-label="디시콘"]'));
+    const picker = document.querySelector('.dccon-pickerContainer');
+    const height = document.querySelector('.dccon-popover').style.height;
+    const con = {idx: '1', title: '안녕', path: 'test', ext: 'png'};
+    await React.act(async () => { await sendDCConMessage(con, {keepOpen: true}); });
+    const popup = document.querySelector('.dccon-popover-expanded');
+    assert.ok(popup);
+    assert.equal(popup.firstElementChild.className, 'dccon-buffer');
+    assert.equal(document.querySelector('.dccon-pickerContainer'), picker);
+    assert.equal(picker.querySelector('.dccon-buffer'), null);
+    assert.equal(popup.style.height, height);
+    await click(document.querySelector('.dccon-buffer-heading button'));
+    assert.equal(document.querySelector('.dccon-popover-expanded'), null);
+    assert.equal(document.querySelector('.dccon-pickerContainer'), picker);
+    await click(document.querySelector('[aria-label="닫기"]'));
+    assert.equal(document.querySelector('.dccon-overlay'), null);
+    assert.deepEqual(errors, []);
+  });
+});
+
 test('private buffer tray shows local thumbnails, survives remount, and supports remove and clear', async () => {
   await scenario('discord-dccon.plugin.js', [], async ({root, BufferTray, sendDCConMessage, setChannel, click, uploads, errors, data}) => {
     data.sendMode = 'image';
@@ -231,12 +254,17 @@ test('private buffer tray shows local thumbnails, survives remount, and supports
     await React.act(async () => { await sendDCConMessage(con, {keepOpen: true}); await sendDCConMessage(con, {keepOpen: true}); });
     assert.equal(uploads.length, 0);
     assert.equal(document.querySelectorAll('.dccon-buffer img').length, 2);
+    assert.equal(document.querySelector('.dccon-buffer-items').dataset.count, '2');
+    assert.equal(document.querySelector('.dccon-buffer-send').disabled, false);
+    assert.deepEqual([...document.querySelectorAll('.dccon-buffer-order')].map(node => node.textContent), ['1', '2']);
     assert.ok(document.querySelector('.dccon-buffer img').src.startsWith('blob:'));
     await React.act(async () => root.render(null));
     await React.act(async () => root.render(React.createElement(BufferTray, {channelId: 'buffer-ui'})));
     assert.equal(document.querySelectorAll('.dccon-buffer img').length, 2);
     await click(document.querySelector('[aria-label="안녕 제거"]'));
     assert.match(document.querySelector('[role="status"]').textContent, /1\/9/);
+    assert.equal(document.querySelector('.dccon-buffer-items').dataset.count, '1');
+    assert.equal(document.querySelector('.dccon-buffer-order').textContent, '1');
     await click(document.querySelector('.dccon-buffer-heading button'));
     assert.equal(document.querySelector('.dccon-buffer'), null);
     assert.deepEqual(errors, []);

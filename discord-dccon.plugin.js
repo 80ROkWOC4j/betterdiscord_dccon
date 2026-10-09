@@ -1,7 +1,7 @@
 /**
  * @name discord-dccon
  * @description 디스코드에서 디시콘을 쉽게 사용할 수 있게 도와주는 플러그인입니다.
- * @version 3.3.1
+ * @version 3.4.0
  * @author 80ROkWOC4j
  * @website https://github.com/80ROkWOC4j/discord-dccon
  * @source https://github.com/80ROkWOC4j/discord-dccon
@@ -203,6 +203,7 @@ class DCConButton extends BdApi.React.Component {
     super(props);
     this.state = { active: false, page: "picker", left: 0, top: 0, height: 480 };
     this.close = this.close.bind(this);
+    this.refreshBuffer = () => { if (this.state.active) this.forceUpdate(); };
     this.onKeyDown = (event) => {
       if (event.key === "Escape") {
         event.stopPropagation();
@@ -215,6 +216,7 @@ class DCConButton extends BdApi.React.Component {
   componentDidMount() {
     PluginEvents.subscribe("DCCON_CLOSE", this.close);
     PluginEvents.subscribe("DCCON_UNPATCH_ALL", this.close);
+    PluginEvents.subscribe("DCCON_BUFFER_UPDATE", this.refreshBuffer);
     window.addEventListener("resize", this.close);
     document.addEventListener("keydown", this.onKeyDown, true);
   }
@@ -226,6 +228,7 @@ class DCConButton extends BdApi.React.Component {
   componentWillUnmount() {
     PluginEvents.unsubscribe("DCCON_CLOSE", this.close);
     PluginEvents.unsubscribe("DCCON_UNPATCH_ALL", this.close);
+    PluginEvents.unsubscribe("DCCON_BUFFER_UPDATE", this.refreshBuffer);
     window.removeEventListener("resize", this.close);
     document.removeEventListener("keydown", this.onKeyDown, true);
   }
@@ -253,6 +256,8 @@ class DCConButton extends BdApi.React.Component {
 
   render() {
     const h = BdApi.React.createElement;
+    const expanded = this.state.page === "picker" && (activeQueue(this.props.channelId).length > 0 || sendingChannels.has(this.props.channelId));
+    const width = this.state.active ? Math.min(expanded ? 780 : 520, window.innerWidth - 16) : 520;
     return h("div", { className: (classes.textarea.buttonContainer ?? "") + " dccon-buttonContainer" },
       h("button", {
         type: "button",
@@ -266,12 +271,14 @@ class DCConButton extends BdApi.React.Component {
       this.state.active && BdApi.ReactDOM.createPortal(
         h("div", { className: "dccon-overlay", onMouseDown: this.close },
           h("section", {
-            className: "dccon-popover",
+            className: "dccon-popover" + (expanded ? " dccon-popover-expanded" : ""),
             role: "dialog",
             "aria-label": "디시콘 선택",
-            style: { left: this.state.left, top: this.state.top, height: this.state.height },
+            style: { left: Math.max(8, this.state.left - (expanded ? 260 : 0)), top: this.state.top, height: this.state.height, width },
             onMouseDown: (event) => event.stopPropagation(),
           },
+            expanded && h(BufferTray, {channelId: this.props.channelId}),
+            h("div", {className: "dccon-popover-main", key: "main"},
             h("div", { className: "dccon-popover-toolbar" },
               ...[["picker", "내 디시콘"], ["packs", "팩 추가 / 관리"], ["settings", "설정"]].map(([page, label]) =>
                 h("button", { key: page, type: "button", "aria-pressed": this.state.page === page,
@@ -280,7 +287,7 @@ class DCConButton extends BdApi.React.Component {
             ),
             h("div", { className: "dccon-popover-body" },
               this.state.page !== "picker" ? h(DCConSettingsPanel, { key: this.state.page, section: this.state.page }) : h(DCConPanel, { type: "dccon", onManage: () => this.setState({ page: "packs" }) })
-            )
+            ))
           )
         ), document.body
       )
@@ -732,9 +739,8 @@ async function postDCCon(rest, channelId, attempt, attachments) {
 
 let bufferGeneration = 0;
 // 디시콘 메시지 전송 함수
-const sendDCConMessage = (con, { keepOpen = false } = {}) => {
+const sendDCConMessage = (con, { keepOpen = false, channelId = currentChannelId } = {}) => {
   const startedAt = new Date().toISOString();
-  const channelId = currentChannelId;
   const generation = bufferGeneration;
   if (sendingChannels.has(channelId)) return Promise.resolve(false);
   const sending = !keepOpen;
@@ -748,10 +754,11 @@ const sendDCConMessage = (con, { keepOpen = false } = {}) => {
       if (generation !== bufferGeneration) { attempt.outcome = "플러그인 종료로 취소"; return false; }
       markSend(attempt, "채널 확인", { hasChannel: Boolean(channelId) });
       if (!channelId) throw new Error("현재 채널을 찾을 수 없습니다.");
+      if (!con && !activeQueue(channelId).length) return false;
       if (keepOpen && activeQueue(channelId).length >= 9)
         throw new Error("최대 9개까지 모을 수 있습니다. 일반 클릭으로 마지막 콘과 함께 보내세요.");
       markSend(attempt, "캐시 / 이미지 준비");
-      const image = await getDCConImage(con);
+      const image = con ? await getDCConImage(con) : null;
       attempt.imageBytes = image?.size ?? 0;
       if (generation !== bufferGeneration) { attempt.outcome = "플러그인 종료로 취소"; return false; }
       markSend(attempt, "전송 준비");
@@ -762,9 +769,9 @@ const sendDCConMessage = (con, { keepOpen = false } = {}) => {
         markSend(attempt, "완료", { outcome: "버퍼 누적 완료", queuedCount: activeQueue(channelId).length });
       } else {
         const queued = activeQueue(channelId);
-        await sendImagesDirectly([...queued.map(entry => entry.file), image], channelId, attempt);
+        await sendImagesDirectly([...queued.map(entry => entry.file), ...(image ? [image] : [])], channelId, attempt);
         if (generation === bufferGeneration) updateQueue(channelId, []);
-        sentCons = [...queued.map(entry => entry.con), con];
+        sentCons = [...queued.map(entry => entry.con), ...(con ? [con] : [])];
         markSend(attempt, "완료", { outcome: "전송 성공 확인", sentCount: sentCons.length });
       }
       let recent = loadData("recent", []);
@@ -805,12 +812,19 @@ class BufferTray extends BdApi.React.Component {
     if (!entries.length && !busy) return null;
     return h("section", { className: "dccon-buffer", "aria-label": "전송 대기 디시콘" },
       h("div", { className: "dccon-buffer-heading" },
-        h("span", {role: "status"}, busy ? "전송 중…" : "이미지 " + entries.length + "/9 · 다음 클릭으로 함께 전송"),
-        h("button", {type: "button", disabled: busy, onClick: () => removeBuffered(channelId)}, "전체 비우기")),
-      h("div", {className: "dccon-buffer-items"}, entries.map((entry, index) => h("button", {
+        h("span", {role: "status"}, busy ? "전송 중…" : "모아둔 콘 " + entries.length + "/9"),
+        h("div", {className: "dccon-buffer-actions"},
+          h("button", {type: "button", disabled: busy, onClick: () => removeBuffered(channelId)}, "전체 비우기"),
+          h("button", {type: "button", className: "dccon-buffer-send", disabled: busy || !entries.length,
+            onClick: () => sendDCConMessage(null, {channelId})}, "전송"))),
+      h("div", {className: "dccon-buffer-preview"},
+        h("div", {className: "dccon-buffer-items", "data-count": entries.length}, entries.map((entry, index) => h("button", {
         key: index, type: "button", disabled: busy, title: entry.con.title + " 제거",
         "aria-label": entry.con.title + " 제거", onClick: () => removeBuffered(channelId, entry),
-      }, h(BufferImage, {file: entry.file, title: entry.con.title}), h("span", null, "×")))));
+      }, h("div", {className: "dccon-buffer-media"}, h(BufferImage, {file: entry.file, title: entry.con.title})),
+        h("span", {className: "dccon-buffer-order", "aria-hidden": true}, index + 1),
+        h("span", {className: "dccon-buffer-remove", "aria-hidden": true}, "×"))))),
+      h("p", {className: "dccon-buffer-hint"}, "예상 배치 · 기기마다 크기는 달라질 수 있어요. 일반 클릭은 콘을 하나 더 추가해 전송합니다."));
   }
 }
 class BufferImage extends BdApi.React.Component {
@@ -1180,7 +1194,6 @@ class DCConPanel extends BdApi.React.Component {
                   !this.state.dccons.length && h("button", { type: "button", onClick: this.props.onManage }, "팩 추가하기"))
         )
       ),
-      h(BufferTray, {channelId: currentChannelId}),
       h("div", { className: "dccon-footer" }, "클릭: 누적 콘과 함께 전송 · Shift+클릭: 모아두기 (최대 9개)")
     );
   }
@@ -1884,7 +1897,7 @@ class DCConSettingsPanel extends BdApi.React.Component {
       h("p", null, "진단은 자동으로 제출되지 않으며, 메시지를 보내거나 입력 중인 내용을 변경하지 않습니다."),
       h(Button, { text: this.state.diagnosticReport ? "진단 정보 새로고침" : "진단 정보 만들기", onClick: () => {
         const report = inspectInstantSend();
-        this.setState({ diagnosticReport: JSON.stringify({ pluginVersion: "3.3.1", generatedAt: new Date().toISOString(), ...report }, null, 2),
+        this.setState({ diagnosticReport: JSON.stringify({ pluginVersion: "3.4.0", generatedAt: new Date().toISOString(), ...report }, null, 2),
           copyStatus: "" });
       } }),
       this.state.diagnosticReport && h("div", null,
@@ -2084,6 +2097,11 @@ module.exports = class DCCon {
 .dccon-buttonContainer { margin-left: 8px; }
 .dccon-overlay { position: fixed; inset: 0; z-index: 10000; }
 .dccon-popover { position: fixed; width: min(520px, calc(100vw - 16px)); display: flex; flex-direction: column; overflow: hidden; border: 1px solid var(--border-subtle, #80808033); border-radius: 8px; box-shadow: 0 8px 32px #0006; }
+.dccon-popover-expanded { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 2fr); }
+.dccon-popover-main { display: flex; flex-direction: column; min-width: 0; min-height: 0; height: 100%; }
+.dccon-popover-expanded > .dccon-buffer { display: flex; flex-direction: column; min-width: 0; min-height: 0; border-top: 0; border-right: 1px solid #80808033; padding: 12px; }
+.dccon-popover-expanded .dccon-buffer-heading { flex-wrap: wrap; gap: 8px; }
+.dccon-popover-expanded .dccon-buffer-preview { flex: 1; min-height: 0; max-height: none; display: flex; align-items: center; }
 .dccon-popover-toolbar { display: flex; gap: 8px; padding: 12px 12px 4px; }
 .dccon-popover-toolbar button { padding: 7px 12px; background: transparent; border-radius: 6px; font-weight: 600; color: var(--dc-muted); }
 .dccon-popover-toolbar button:hover { background: var(--dc-hover); color: var(--dc-text); }
@@ -2126,10 +2144,45 @@ module.exports = class DCCon {
 .dccon-buffer-heading { display: flex; justify-content: space-between; align-items: center; font-size: 12px; }
 .dccon-buffer button { color: inherit; background: transparent; border: 0; cursor: pointer; }
 .dccon-buffer button:disabled { opacity: .5; cursor: wait; }
-.dccon-buffer-items { display: flex; gap: 6px; overflow-x: auto; margin-top: 6px; }
-.dccon-buffer-items button { position: relative; flex: 0 0 44px; height: 44px; border-radius: 6px; background: #80808022; }
-.dccon-buffer-items img { width: 36px; height: 36px; object-fit: contain; }
-.dccon-buffer-items span { position: absolute; top: 0; right: 0; border-radius: 4px; background: var(--background-secondary, #232428); }
+.dccon-buffer-actions { display: flex; align-items: center; gap: 8px; }
+.dccon-buffer .dccon-buffer-send { padding: 5px 12px; border-radius: 5px; background: var(--dc-accent, #5865f2); color: white; }
+.dccon-buffer-preview { max-height: 190px; overflow-y: auto; margin-top: 6px; }
+.dccon-buffer-items { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 3px; width: min(100%, 210px); margin: auto; }
+.dccon-buffer-items button { position: relative; grid-column: span 2; aspect-ratio: 1; min-width: 0; min-height: 0; padding: 0; overflow: hidden; border-radius: 4px; background: #80808022; }
+/* Square-con layouts observed in Discord. Six tracks allow either two or three tiles per row.
+   Ratios describe the visible crop, not the inner image's aspect ratio. */
+/* 1: single square. */
+.dccon-buffer-items[data-count="1"] { width: min(100%, 100px); }
+.dccon-buffer-items[data-count="1"] button { grid-column: span 6; }
+/* 2: two squares side by side. */
+.dccon-buffer-items[data-count="2"] button { grid-column: span 3; }
+/* 3: large left tile, two stacked right tiles. */
+.dccon-buffer-items[data-count="3"] { grid-template-columns: 2fr 1fr; grid-template-rows: repeat(2, minmax(0, 1fr)); aspect-ratio: 11 / 7; }
+.dccon-buffer-items[data-count="3"] button { grid-column: auto; aspect-ratio: auto; }
+.dccon-buffer-items[data-count="3"] button:first-child { grid-row: span 2; }
+/* 4: two rows of two wide crops. */
+.dccon-buffer-items[data-count="4"] button { grid-column: span 3; aspect-ratio: 273 / 173; }
+/* 5: two squares above three squares. */
+.dccon-buffer-items[data-count="5"] button:nth-child(-n+2) { grid-column: span 3; }
+/* 6: two rows of three squares (the default tracks and tile span). */
+/* 7: wide top crop above two rows of three squares. */
+.dccon-buffer-items[data-count="7"] { width: min(100%, 156px); }
+.dccon-buffer-items[data-count="7"] button:first-child { grid-column: span 6; aspect-ratio: 55 / 28; }
+/* 8: two squares above two rows of three squares. */
+.dccon-buffer-items[data-count="8"] { width: min(100%, 156px); }
+.dccon-buffer-items[data-count="8"] button:nth-child(-n+2) { grid-column: span 3; }
+/* 9: three rows of three squares. */
+.dccon-buffer-items[data-count="9"] { width: min(100%, 180px); }
+.dccon-buffer-media { position: absolute; inset: 0; overflow: hidden; }
+/* Discord centers the cover crop in the 3-item layout and the wide 7-item tile. */
+.dccon-buffer-media img { display: block; width: 100%; height: 100%; object-fit: cover; object-position: center; }
+/* The 4-item grid instead clips a width-sized image from the bottom (273 x 173 at 550px). */
+.dccon-buffer-items[data-count="4"] .dccon-buffer-media img { height: auto; min-height: 100%; object-position: top; }
+.dccon-buffer-items span { position: absolute; top: 2px; padding: 1px 4px; border-radius: 3px; background: #000a; color: white; font-size: 11px; line-height: 16px; }
+.dccon-buffer-order { left: 2px; }
+.dccon-buffer-remove { right: 2px; }
+.dccon-buffer-items button:focus-visible { outline: 2px solid var(--dc-accent, #5865f2); outline-offset: -2px; }
+.dccon-buffer-hint { margin: 5px 0 0; color: var(--dc-muted); font-size: 11px; line-height: 1.4; }
 .dccon-footer { padding: 8px 12px; color: var(--dc-muted); font-size: 11px; border-top: 1px solid #80808033; }
 .dccon-empty-state { padding: 32px 16px; text-align: center; color: var(--dc-muted); grid-column: 1 / -1; }
 .dccon-empty-state button { display: block; margin: 16px auto 0; border-radius: 4px; padding: 8px 12px; background: var(--dc-accent); color: #fff; }
