@@ -30,7 +30,7 @@ test('real WASM codecs preserve still pixels, GIF playback, and survive repeated
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../discord-dccon.plugin.js'), 'utf8') + '\nmodule.exports=WebPCache;', context);
   const codec = context.module.exports;
   const assets = {};
-  for (const [kind, {name, hashes}] of Object.entries(codec.specs)) {
+  for (const [kind, {name, hashes}] of Object.entries(codec.specs).filter(([, spec]) => spec.name)) {
     const dir = path.join(__dirname, '../node_modules/@libwebp-wasm', name, 'es');
     const source = fs.readFileSync(path.join(dir, name + '.js'));
     const wasm = fs.readFileSync(path.join(dir, name + '.wasm'));

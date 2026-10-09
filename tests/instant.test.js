@@ -5,7 +5,7 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 const path = require('node:path');
 
-function harness({uploadFails = false, postFails = false, missing = false, cleanupFails = false, noAcknowledgement = false, postRejects = false, htmlResponse = false, functionDecoy = false, onUpload, cacheDirectory, fetchFails = false, callbackFs = false, cacheWriteFails = false, downloadBytes = [1, 2, 3]} = {}) {
+function harness({uploadFails = false, postFails = false, missing = false, cleanupFails = false, noAcknowledgement = false, postRejects = false, htmlResponse = false, functionDecoy = false, onUpload, splitImage, cacheDirectory, fetchFails = false, callbackFs = false, cacheWriteFails = false, downloadBytes = [1, 2, 3]} = {}) {
   const calls = {staged: 0, posts: [], closes: 0, errors: [], uploads: [], fetches: 0};
   const data = {sendMode: "image", draft: '작성 중인 글', attachments: ['existing'], reply: 'reply-id'};
   class Upload extends EventEmitter {
@@ -64,12 +64,27 @@ function harness({uploadFails = false, postFails = false, missing = false, clean
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../discord-dccon.plugin.js'), 'utf8') +
     // Conversion itself is exercised with real WASM in webp.test.js; send tests use byte fixtures.
     '\nWebPCache.convert = async bytes => bytes; module.exports = {WebPCache, sendDCConMessage, inspectInstantSend, events: PluginEvents, activeQueue, removeBuffered, getDCConImage, setChannel: id => {currentChannelId = id;}};', context);
+  if (splitImage) { context.splitImageForTest = splitImage; vm.runInNewContext("splitImageIntoNine = splitImageForTest;", context); }
   const api = context.module.exports;
   api.setChannel('test-channel');
   api.events.subscribe('DCCON_CLOSE', () => calls.closes++);
   return {api, calls, data, drafts, staging};
 }
 const con = {idx: '1', path: 'image', ext: 'png', title: 'test'};
+
+test('buffer additions preserve recent order until a successful send', async () => {
+  const {api, data} = harness();
+  const other = {...con, idx: '2', path: 'other'};
+  data.recent = [other, con];
+  let updates = 0;
+  api.events.subscribe('DCCON_RECENT_UPDATE', () => updates++);
+  await api.sendDCConMessage(con, {keepOpen: true});
+  assert.deepEqual(data.recent, [other, con]);
+  assert.equal(updates, 0);
+  await api.sendDCConMessage(null);
+  assert.deepEqual(Array.from(data.recent, item => item.path), ['image', 'other']);
+  assert.equal(updates, 1);
+});
 
 test('instant send posts only selected file and leaves draft, existing attachments and reply untouched', async () => {
   const {api, calls, data} = harness();
@@ -107,6 +122,46 @@ test('Shift accumulates only private buffer; normal click sends one batch withou
   assert.equal(calls.closes, 1);
   await api.sendDCConMessage(con);
   assert.notEqual(calls.posts[0].body.nonce, calls.posts[1].body.nonce);
+});
+
+test('split send posts nine tiles in order and records only the original con', async () => {
+  const files = Array.from({length: 9}, (_, i) => new File([String(i)], 'tile-' + i + '.webp'));
+  const {api, calls, data} = harness({splitImage: async (file, checkActive) => {checkActive(); return files;}});
+  await api.sendDCConMessage(con, {keepOpen: true});
+  assert.equal(await api.sendDCConMessage(null, {splitNine: true}), true);
+  assert.deepEqual(calls.uploads.map(upload => upload.item.file), files);
+  assert.equal(calls.posts[0].body.attachments.length, 9);
+  assert.equal(api.activeQueue('test-channel').length, 0);
+  assert.deepEqual(Array.from(data.recent, item => item.path), [con.path]);
+});
+
+test('split requires exactly one queued image, including pending additions', async () => {
+  let splits = 0;
+  const {api, calls} = harness({splitImage: async () => {splits++; return [];}});
+  assert.equal(await api.sendDCConMessage(null, {splitNine: true}), false);
+  await api.sendDCConMessage(con, {keepOpen: true});
+  const adding = api.sendDCConMessage(con, {keepOpen: true});
+  const sending = api.sendDCConMessage(null, {splitNine: true});
+  await adding;
+  assert.equal(await sending, false);
+  assert.equal(splits, 0);
+  assert.equal(calls.posts.length, 0);
+  assert.equal(api.activeQueue('test-channel').length, 2);
+});
+
+test('split preparation locks the buffer and failure preserves its original image', async () => {
+  let rejectSplit;
+  const {api, calls} = harness({splitImage: () => new Promise((_, reject) => {rejectSplit = reject;})});
+  await api.sendDCConMessage(con, {keepOpen: true});
+  const sending = api.sendDCConMessage(null, {splitNine: true});
+  await new Promise(resolve => setImmediate(resolve));
+  api.removeBuffered('test-channel');
+  assert.equal(await api.sendDCConMessage(null, {splitNine: true}), false);
+  rejectSplit(new Error('conversion failed'));
+  assert.equal(await sending, false);
+  assert.equal(calls.posts.length, 0);
+  assert.equal(api.activeQueue('test-channel').length, 1);
+  assert.equal(calls.closes, 0);
 });
 
 test('buffer-only send preserves order and duplicates without fetching or appending another image', async () => {

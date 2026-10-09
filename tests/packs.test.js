@@ -256,6 +256,7 @@ test('private buffer tray shows local thumbnails, survives remount, and supports
     assert.equal(document.querySelectorAll('.dccon-buffer img').length, 2);
     assert.equal(document.querySelector('.dccon-buffer-items').dataset.count, '2');
     assert.equal(document.querySelector('.dccon-buffer-send').disabled, false);
+    assert.equal(document.querySelector('.dccon-buffer-split').disabled, true);
     assert.deepEqual([...document.querySelectorAll('.dccon-buffer-order')].map(node => node.textContent), ['1', '2']);
     assert.ok(document.querySelector('.dccon-buffer img').src.startsWith('blob:'));
     await React.act(async () => root.render(null));
@@ -265,6 +266,7 @@ test('private buffer tray shows local thumbnails, survives remount, and supports
     assert.match(document.querySelector('[role="status"]').textContent, /1\/9/);
     assert.equal(document.querySelector('.dccon-buffer-items').dataset.count, '1');
     assert.equal(document.querySelector('.dccon-buffer-order').textContent, '1');
+    assert.equal(document.querySelector('.dccon-buffer-split').disabled, false);
     await click(document.querySelector('.dccon-buffer-heading button'));
     assert.equal(document.querySelector('.dccon-buffer'), null);
     assert.deepEqual(errors, []);

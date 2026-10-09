@@ -4,6 +4,7 @@ const vm = require('node:vm');
 const {execFileSync} = require('node:child_process');
 const output = path.resolve(__dirname, '../artifacts/shelter');
 async function main() {
+  require('../scripts/build-split-worker.cjs');
   await fs.mkdir(output, {recursive: true});
   const dependency = path.resolve(__dirname, '../vendor/shelter');
   let shelter;
